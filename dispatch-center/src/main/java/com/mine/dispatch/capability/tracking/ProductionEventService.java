@@ -20,7 +20,13 @@ public class ProductionEventService {
     public record Event(int schemaVersion,String eventId,String runId,String simulationId,
                         String cycleId,int vehicleId,String eventType,int siteId,
                         double simTimeSeconds,long sentWallTimeMs,String commandId,
-                        Double payloadTons,Double payloadGrade,Boolean producesOre,Boolean productionEligible,String previousCommandId) {
+                        Double payloadTons,Double payloadGrade,Boolean producesOre,Boolean productionEligible,String previousCommandId,String previousCycleId) {
+        public Event(int schemaVersion,String eventId,String runId,String simulationId,String cycleId,int vehicleId,
+                String eventType,int siteId,double simTimeSeconds,long sentWallTimeMs,String commandId,
+                Double payloadTons,Double payloadGrade,Boolean producesOre,Boolean productionEligible,String previousCommandId) {
+            this(schemaVersion,eventId,runId,simulationId,cycleId,vehicleId,eventType,siteId,simTimeSeconds,
+                 sentWallTimeMs,commandId,payloadTons,payloadGrade,producesOre,productionEligible,previousCommandId,null);
+        }
         public Event(int schemaVersion,String eventId,String runId,String simulationId,String cycleId,int vehicleId,
                 String eventType,int siteId,double simTimeSeconds,long sentWallTimeMs,String commandId,
                 Double payloadTons,Double payloadGrade,Boolean producesOre,Boolean productionEligible) {
@@ -64,11 +70,12 @@ public class ProductionEventService {
         return ingest(e);
     }
     public Receipt ingest(Event e) throws Exception {
-        if(e.schemaVersion()!=1||!ORDER.contains(e.eventType())||e.vehicleId()<0||e.siteId()<0
+        if(e.schemaVersion()!=1||!(ORDER.contains(e.eventType())||Set.of("HAUL_EMPTY_START","HAUL_FULL_START").contains(e.eventType()))||e.vehicleId()<0||e.siteId()<0
                 ||!Double.isFinite(e.simTimeSeconds())||e.simTimeSeconds()<0||e.sentWallTimeMs()<=0)bad("invalid event fields");
         for(String id:List.of(Objects.toString(e.eventId(),""),Objects.toString(e.runId(),""),Objects.toString(e.cycleId(),""))) {
             if(!id.matches("[A-Za-z0-9_-]{1,80}"))bad("invalid event/run/cycle identity");
         }
+        if(e.previousCycleId()!=null&&(!e.previousCycleId().matches("[A-Za-z0-9_-]{1,80}")||e.previousCycleId().equals(e.cycleId())))bad("invalid previous cycle identity");
         if(e.payloadTons()!=null&&(!Double.isFinite(e.payloadTons())||e.payloadTons()<0))bad("invalid tons");
         if(e.payloadGrade()!=null&&(!Double.isFinite(e.payloadGrade())||e.payloadGrade()<0||e.payloadGrade()>1))bad("invalid grade fraction");
         if("DUMP_FINISH".equals(e.eventType())&&(e.payloadTons()==null||e.payloadGrade()==null||e.producesOre()==null||e.productionEligible()==null))bad("dump completion requires original payload and eligibility");
@@ -97,7 +104,7 @@ public class ProductionEventService {
                     s.setString(1,e.runId());s.setString(2,e.cycleId());try(ResultSet r=s.executeQuery()) {
                         while(r.next()) {
                             if(r.getInt(1)!=e.vehicleId())bad("cycle belongs to another vehicle");
-                            if(ORDER.indexOf(r.getString(3))/4==ORDER.indexOf(e.eventType())/4&&r.getInt(2)!=e.siteId())bad("site changed within service phase");
+                            if(ORDER.contains(r.getString(3))&&ORDER.contains(e.eventType())&&ORDER.indexOf(r.getString(3))/4==ORDER.indexOf(e.eventType())/4&&r.getInt(2)!=e.siteId())bad("site changed within service phase");
                         }
                     }
                 }
@@ -124,10 +131,13 @@ public class ProductionEventService {
         }
     }
     public List<Event> events(String run,Integer vehicle,int limit) throws Exception {
+        return events(run,vehicle,limit,false);
+    }
+    public List<Event> events(String run,Integer vehicle,int limit,boolean latestWindow) throws Exception {
         exists(run);if(limit<1||limit>1000)bad("limit must be 1..1000");
-        try(Connection c=open();PreparedStatement s=c.prepareStatement("SELECT payload_json FROM production_event WHERE run_id=?"+(vehicle==null?"":" AND vehicle_id=?")+" ORDER BY sim_time_seconds,event_id LIMIT ?")) {
+        try(Connection c=open();PreparedStatement s=c.prepareStatement("SELECT payload_json FROM production_event WHERE run_id=?"+(vehicle==null?"":" AND vehicle_id=?")+" ORDER BY sim_time_seconds "+(latestWindow?"DESC":"ASC")+",event_id "+(latestWindow?"DESC":"ASC")+" LIMIT ?")) {
             s.setString(1,run);int i=2;if(vehicle!=null)s.setInt(i++,vehicle);s.setInt(i,limit);
-            List<Event> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(json.readValue(r.getString(1),Event.class));}return out;
+            List<Event> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(json.readValue(r.getString(1),Event.class));}if(latestWindow)Collections.reverse(out);return out;
         }
     }
     public Map<String,Object> summary(String run) throws Exception {

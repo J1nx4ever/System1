@@ -13,6 +13,7 @@
       <label><span>Simulation</span><select id="simulation-select" aria-label="选择仿真实例"></select></label>
       <label class="run-select-wrap"><span>Run / 场景</span><select id="run-select" aria-label="选择运行"></select></label>
       <div class="context-value"><span>仿真业务时间</span><strong id="sim-time">--</strong></div>
+      <button id="finish-run" class="finish-run" hidden>结束本次运行</button>
       <div class="health-badge" id="mqtt-health"><i></i><span>MQTT 未知</span></div>
       <div class="health-badge" id="field-health"><i></i><span>现场未知</span></div>
       <div class="user-chip" id="user-chip">--</div>
@@ -57,7 +58,7 @@
         <div class="monitor-grid">
           <section class="card object-list-card"><header><h3>现场对象</h3><small id="object-count">--</small></header><div id="object-list" class="object-list empty">等待现场状态</div></section>
           <section class="card map-card"><header><div><span class="eyebrow">RECORDED MAP STATE</span><h3>矿区实时态势</h3></div><div class="map-actions"><button id="zoom-out">−</button><button id="fit-map">适配</button><button id="zoom-in">＋</button></div></header><div id="map-viewport" class="map-viewport"><div id="empty-map" class="map-empty"><span class="radar"></span><strong>等待现场地图</strong><small>只显示 MapState 与实体坐标</small></div><div id="world" class="world" hidden><img id="mine-image" src="/assets/image2.png" alt="矿区地图"><svg id="road-layer" class="overlay road-layer"></svg><div id="shovel-layer" class="overlay"></div><div id="vehicle-layer" class="overlay"></div></div><div class="map-legend"><span><i class="dot vehicle"></i>空载</span><span><i class="dot loaded"></i>载重</span><span><i class="dot shovel"></i>铲装点</span><span><i class="dot stale"></i>失联</span></div></div></section>
-          <aside class="card object-detail"><header><h3 id="detail-title">对象详情</h3><button id="close-detail" title="关闭">×</button></header><div id="detail-empty" class="detail-empty">从地图或列表选择车辆 / 铲装点</div><div id="detail-body" hidden><div id="detail-status" class="detail-status"></div><dl id="detail-fields"></dl><div class="detail-actions"><button id="detail-decision">查看决策证据</button><button id="detail-cycle">查看所属 Cycle</button></div><div class="manual-dispatch"><h4>人工改派</h4><p id="dispatch-context">由服务端校验在线、行驶态、载荷、目标与路线。</p><label>改派目标<select id="dispatch-target"></select></label><button id="dispatch-submit">确认改派</button><small id="dispatch-status">选择行驶中的车辆</small><div id="dispatch-history" class="dispatch-history"></div></div></div></aside>
+          <aside class="card object-detail"><header><h3 id="detail-title">任务指派 / 对象详情</h3><button id="close-detail" title="关闭">×</button></header><div id="detail-empty" class="detail-empty">① 选择车辆 → ② 选择目标 → ③ 确认下发</div><div id="detail-body" hidden><div id="detail-status" class="detail-status"></div><dl id="detail-fields"></dl><div class="detail-actions"><button id="detail-decision">查看决策证据</button><button id="detail-cycle">查看所属 Cycle</button></div></div><div class="manual-dispatch"><h4>人工任务指派（改派）</h4><p id="dispatch-context">由服务端校验在线、行驶态、载荷、目标与路线。</p><label>改派目标<select id="dispatch-target"></select></label><button id="dispatch-submit">确认改派</button><small id="dispatch-status">选择行驶中的车辆</small><div id="dispatch-history" class="dispatch-history"></div></div></aside>
         </div>
       </section>
 

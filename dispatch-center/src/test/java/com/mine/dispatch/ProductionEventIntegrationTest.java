@@ -55,6 +55,8 @@ class ProductionEventIntegrationTest {
         assertThatThrownBy(()->events.ingest(event(run,"cycle1",0,99))).isInstanceOf(ResponseStatusException.class);
         // Out-of-order delivery is allowed; production chronology still comes from simulation time.
         for(int n=7;n>0;n--)events.ingest(event(run,"cycle1",n,n*10));
+        assertThat(events.events(run,null,3,true)).extracting(ProductionEventService.Event::simTimeSeconds)
+            .containsExactly(50.0,60.0,70.0);
         assertThat(runs.events(run,0,"",0,null,100)).hasSize(8);
         assertThat(runs.events(run,0,"",0,null,100)).allSatisfy(e->assertThat(e.get("related_cycle_id")).isEqualTo("cycle1"));
         assertThat(runs.evidence(run,"production_event:cycle1-7")).containsKey("sourceRecord");

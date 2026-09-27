@@ -48,6 +48,33 @@ class CycleStoryIntegrationTest {
         assertThatThrownBy(()->events.ingest(event(id,"old-cycle","old-run",null))).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(()->stories.story(id,"missing-cycle")).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(()->stories.story("missing-run","manual-cycle")).isInstanceOf(ResponseStatusException.class);
+        runs.finish(id,null);
+    }
+    @Test void transportEventsAndExplicitPreviousCycleAreResolvedWithoutChangingEightEventMetrics() throws Exception {
+        String run=(String)runs.start("SIM_STORY",null,null,Map.of(),"test").get("run_id");
+        events.ingest(new ProductionEventService.Event(1,"prior-finish",run,"SIM_STORY","prior",0,"DUMP_FINISH",1,10,System.currentTimeMillis(),null,100.0,0.2,true,true));
+        var empty=new ProductionEventService.Event(1,"next-empty",run,"SIM_STORY","next",0,"HAUL_EMPTY_START",2,11,System.currentTimeMillis(),null,null,null,null,null,null,"prior");
+        assertThat(events.ingest(empty).result()).isEqualTo("ACCEPTED");
+        assertThat(events.ingest(empty).result()).isEqualTo("DUPLICATE");
+        var story=stories.story(run,"next");
+        assertThat(story.get("previousCycleStatus")).isEqualTo("EXPLICIT_PREVIOUS_CYCLE");
+        assertThat(((ProductionEventService.Event)story.get("previousUnload")).cycleId()).isEqualTo("prior");
+        assertThat(story.get("transportComplete")).isEqualTo(false);
+        List<String> types=List.of("ARRIVE_SHOVEL","QUEUE_LOAD","LOADING_START","LOADING_FINISH","HAUL_FULL_START","ARRIVE_DUMP","QUEUE_DUMP","DUMP_START","DUMP_FINISH");
+        for(int i=0;i<types.size();i++) {
+            boolean finish=i==8;
+            events.ingest(new ProductionEventService.Event(1,"next-"+i,run,"SIM_STORY","next",0,types.get(i),i<4?2:1,12+i,System.currentTimeMillis(),null,finish?100.0:null,finish?0.2:null,finish?true:null,finish?true:null,null,"prior"));
+        }
+        story=stories.story(run,"next");
+        assertThat(story.get("stageComplete")).isEqualTo(true);
+        assertThat(story.get("transportComplete")).isEqualTo(true);
+        assertThat(story.get("fullCycleComplete")).isEqualTo(false); // No explicit dispatch evidence.
+        assertThat(events.summary(run).get("completeCycles")).isEqualTo(1);
+        events.ingest(new ProductionEventService.Event(1,"unresolved",run,"SIM_STORY","unresolved",0,"HAUL_EMPTY_START",0,21,System.currentTimeMillis(),null,null,null,null,null,null,"missing"));
+        assertThat(stories.story(run,"unresolved").get("previousCycleStatus")).isEqualTo("UNRESOLVED");
+        assertThat(stories.story(run,"prior").get("previousCycleStatus")).isEqualTo("NO_SOURCE_REFERENCE");
+        assertThatThrownBy(()->events.ingest(new ProductionEventService.Event(1,"self",run,"SIM_STORY","self",0,"HAUL_EMPTY_START",0,22,System.currentTimeMillis(),null,null,null,null,null,null,"self"))).isInstanceOf(ResponseStatusException.class);
+        runs.finish(run,null);
     }
     @Test void snapshotPreservesInputAndLabelsMissingEvidence() {
         var obs=DRL.grpc.Observation.newBuilder().setSchemaId("dispatch.v1-27");for(int i=0;i<27;i++)obs.addValues(i/27f);

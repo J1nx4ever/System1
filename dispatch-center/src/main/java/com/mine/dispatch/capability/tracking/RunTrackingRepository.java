@@ -77,11 +77,27 @@ public class RunTrackingRepository {
         finite(simEnd);
         Map<String,Object> r = run(id);
         if (simEnd != null && r.get("simulation_start_seconds") instanceof Number n && simEnd < n.doubleValue()) bad("simulation time moves backwards");
+        long now=System.currentTimeMillis();
+        long started=((Number)r.get("started_at_ms")).longValue();
+        Double observed=latestSimulationTime((String)r.get("simulation_id"),started,now);
+        if(observed!=null&&(simEnd==null||observed>simEnd))simEnd=observed;
         try (Connection c = open(); PreparedStatement s = c.prepareStatement(
                 "UPDATE run_context SET ended_at_ms=?, simulation_end_seconds=? WHERE run_id=? AND ended_at_ms IS NULL")) {
-            s.setLong(1,System.currentTimeMillis()); s.setObject(2,simEnd); s.setString(3,id); s.executeUpdate();
+            s.setLong(1,now); s.setObject(2,simEnd); s.setString(3,id); s.executeUpdate();
         }
         return run(id);
+    }
+
+    private Double latestSimulationTime(String simulationId,long started,long ended) throws SQLException {
+        String sql="SELECT MAX(sim_time_seconds) FROM ("
+                +"SELECT sim_time_seconds FROM map_state_history WHERE simulation_id=? AND received_at_ms BETWEEN ? AND ? UNION ALL "
+                +"SELECT sim_time_seconds FROM vehicle_state_history WHERE simulation_id=? AND received_at_ms BETWEEN ? AND ? UNION ALL "
+                +"SELECT sim_time_seconds FROM shovel_state_history WHERE simulation_id=? AND received_at_ms BETWEEN ? AND ? UNION ALL "
+                +"SELECT sim_time_seconds FROM production_event WHERE simulation_id=? AND sent_wall_time_ms BETWEEN ? AND ?)";
+        try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)) {
+            for(int i=0;i<4;i++){int p=i*3+1;s.setString(p,simulationId);s.setLong(p+1,started);s.setLong(p+2,ended);}
+            try(ResultSet r=s.executeQuery()){if(!r.next())return null;double value=r.getDouble(1);return r.wasNull()?null:value;}
+        }
     }
 
     public Map<String,Object> run(String id) throws Exception {
@@ -102,18 +118,26 @@ public class RunTrackingRepository {
 
     public List<Map<String,Object>> events(String id, long afterMs, String afterId,
                                           Integer vehicle, String command, int limit) throws Exception {
+        return events(id, afterMs, afterId, vehicle, command, limit, false);
+        }
+
+        public List<Map<String,Object>> events(String id, long afterMs, String afterId,
+                          Integer vehicle, String command, int limit,
+                          boolean latestWindow) throws Exception {
         if (limit < 1 || limit > 500) bad("limit must be 1..500");
         Map<String,Object> r = run(id);
         String sql = "SELECT * FROM run_event_projection WHERE simulation_id=? AND CASE WHEN source='decision_trace' THEN (SELECT created_at_ms FROM decision_trace d WHERE d.decision_id=source_id) ELSE wall_time_ms END >=? AND CASE WHEN source='decision_trace' THEN (SELECT created_at_ms FROM decision_trace d WHERE d.decision_id=source_id) ELSE wall_time_ms END <? AND (source<>'production_event' OR (SELECT run_id FROM production_event p WHERE p.event_id=source_id)=?)"
                 + " AND (wall_time_ms>? OR (wall_time_ms=? AND event_id>?))"
                 + (vehicle == null ? "" : " AND object_type='VEHICLE' AND object_id=?")
                 + (command == null ? "" : " AND command_id=?")
-                + " ORDER BY wall_time_ms,event_id LIMIT ?";
+            + " ORDER BY wall_time_ms " + (latestWindow ? "DESC" : "ASC")
+            + ",event_id " + (latestWindow ? "DESC" : "ASC") + " LIMIT ?";
         List<Object> args = new ArrayList<>(Arrays.asList(r.get("simulation_id"),r.get("started_at_ms"),end(r),id,afterMs,afterMs,afterId));
         if (vehicle != null) args.add(vehicle);
         if (command != null) args.add(command);
         args.add(limit);
         List<Map<String,Object>> rows = query(sql,args.toArray());
+        if (latestWindow) Collections.reverse(rows);
         for (Map<String,Object> event : rows) {
             event.put("run_id",id); event.put("related_task_id",null); event.put("related_cycle_id",null);
             if ("production_event".equals(event.get("source"))) {
@@ -167,8 +191,13 @@ public class RunTrackingRepository {
         Map<String,Object> out = new LinkedHashMap<>();
         out.put("runId",id); out.put("atWallTimeMs",atMs); out.put("interpolated",false);
         for (String type : List.of("vehicle", "shovel", "map")) {
+            if ("map".equals(type)) {
+                out.put(type,query("SELECT * FROM map_state_history WHERE simulation_id=? AND received_at_ms<=? ORDER BY received_at_ms DESC,id DESC LIMIT 1",
+                        r.get("simulation_id"),atMs));
+                continue;
+            }
             String table = type + "_state_history";
-            String partition = "map".equals(type) ? "simulation_id" : type + "_id";
+            String partition = type + "_id";
             out.put(type,query("SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY " + partition
                     + " ORDER BY received_at_ms DESC,id DESC) AS sample_rank FROM " + table
                     + " WHERE simulation_id=? AND received_at_ms>=? AND received_at_ms<=?) WHERE sample_rank=1",

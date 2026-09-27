@@ -42,8 +42,9 @@ public class RunTrackingController {
     @GetMapping("/{id}/events") public List<Map<String,Object>> events(@PathVariable String id,
             @RequestParam(defaultValue="0") long afterMs,@RequestParam(defaultValue="") String afterId,
             @RequestParam(required=false) Integer vehicleId,@RequestParam(required=false) String commandId,
-            @RequestParam(defaultValue="100") int limit,HttpServletRequest req) throws Exception {
-        allowed(req,"RUN_EVENTS",id); return tracking.events(id,afterMs,afterId,vehicleId,commandId,limit);
+            @RequestParam(defaultValue="100") int limit,@RequestParam(defaultValue="false") boolean latest,
+            HttpServletRequest req) throws Exception {
+        allowed(req,"RUN_EVENTS",id); return tracking.events(id,afterMs,afterId,vehicleId,commandId,limit,latest);
     }
     @GetMapping("/{id}/evidence") public Map<String,Object> evidence(@PathVariable String id,@RequestParam String eventId,HttpServletRequest req) throws Exception {
         allowed(req,"RUN_EVIDENCE",id); return tracking.evidence(id,eventId);

@@ -40,10 +40,12 @@ class RunTrackingIntegrationTest {
         long start=((Number)run.get("started_at_ms")).longValue();
         // Synthetic database evidence is strictly test-only, never demo data.
         try(Connection c=DriverManager.getConnection("jdbc:sqlite:"+DB);Statement s=c.createStatement()) {
+            s.executeUpdate("INSERT INTO map_state_history(simulation_id,sequence,sim_time_seconds,received_at_ms,image_file,image_width_px,image_height_px,payload_json) VALUES('SIM_RUN',1,0,"+(start-100)+",'image2.png',1920,957,'{}')");
             s.executeUpdate("INSERT INTO vehicle_state_history(simulation_id,vehicle_id,sequence,sim_time_seconds,sent_wall_time_ms,received_at_ms,x,y,speed_mps,loaded,payload_tons,current_node,destination_node,current_segment_id,target_load_site_id,target_dump_site_id,statechart_state) VALUES('SIM_RUN',0,1,2,0,"+start+",1,2,3,0,0,'A','B','AB',0,0,'Moving')");
             s.executeUpdate("INSERT INTO decision_trace VALUES('d1','SIM_RUN','TASK','DRL_DISPATCH',0,0,'UNLOAD_COMPLETE','{\"simTimeSeconds\":2,\"values\":[1]}','{\"action\":0}',NULL,'PASSED','test','c1','test/topic',"+start+","+start+","+start+","+start+",'EXECUTED','test')");
         }
-        Map<String,Object> finished=tracking.finish(id,10.0);
+        Map<String,Object> finished=tracking.finish(id,1.0);
+        assertThat(finished.get("simulation_end_seconds")).isEqualTo(2.0);
         long end=((Number)finished.get("ended_at_ms")).longValue();
         List<Map<String,Object>> events=tracking.events(id,0,"",null,null,100);
         assertThat(events).hasSize(4);
@@ -58,6 +60,7 @@ class RunTrackingIntegrationTest {
                 .allSatisfy(e->assertThat(e.get("sim_time_seconds")).isNull());
         assertThat(tracking.summary(id).get("productionSummary")).isNull();
         assertThat((List<?>)tracking.replay(id,start).get("vehicle")).hasSize(1);
+        assertThat((List<?>)tracking.replay(id,start).get("map")).hasSize(1);
         assertThatThrownBy(()->tracking.replay(id,start-1)).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(()->tracking.evidence(id,"decision_trace:other:created")).isInstanceOf(ResponseStatusException.class);
         assertThat(tracking.evidence(id,"decision_trace:d1:created")).containsKey("sourceRecord");
@@ -86,6 +89,25 @@ class RunTrackingIntegrationTest {
         assertThat(get("/api/v1/runs/"+id+"/summary",dispatcher).statusCode()).isEqualTo(200);
         assertThat(get("/api/v1/runs/"+id+"/events?limit=0",dispatcher).statusCode()).isEqualTo(400);
         assertThat(post("/api/v1/runs/"+id+"/finish",dispatcher,"{}").statusCode()).isEqualTo(200);
+    }
+
+    @Test void latestEventWindowKeepsRecentSamplesInsteadOfOldestSamples() throws Exception {
+        Map<String,Object> run=tracking.start("SIM_RECENT",null,null,Map.of(),"test");
+        String id=(String)run.get("run_id");
+        long start=((Number)run.get("started_at_ms")).longValue();
+        try(Connection c=DriverManager.getConnection("jdbc:sqlite:"+DB);PreparedStatement s=c.prepareStatement(
+                "INSERT INTO vehicle_state_history(simulation_id,vehicle_id,sequence,sim_time_seconds,sent_wall_time_ms,received_at_ms,x,y,speed_mps,loaded,payload_tons,current_node,destination_node,current_segment_id,target_load_site_id,target_dump_site_id,statechart_state) VALUES('SIM_RECENT',0,?, ?,0,?,0,0,0,0,0,'A','B','AB',0,0,'MoveSegment')")) {
+            for(int sequence=1;sequence<=505;sequence++) {
+                s.setInt(1,sequence);s.setDouble(2,sequence);s.setLong(3,start+sequence);s.addBatch();
+            }
+            s.executeBatch();
+        }
+        List<Map<String,Object>> recent=tracking.events(id,0,"",null,null,3,true);
+        assertThat(recent).extracting(row->((Number)row.get("sim_time_seconds")).intValue())
+                .containsExactly(503,504,505);
+        assertThat(tracking.events(id,0,"",null,null,3)).extracting(row->((Number)row.get("sim_time_seconds")).intValue())
+                .containsExactly(1,2,3);
+        tracking.finish(id,null);
     }
     String login(String username) throws Exception {
         HttpResponse<String> r=post("/api/v1/auth/login",null,"{\"username\":\""+username+"\",\"password\":\"test-pass\"}");

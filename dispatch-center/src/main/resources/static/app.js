@@ -9,17 +9,19 @@ window.dispatchIdentity.then(async identity => {
   const model = {
     identity, simulations: [], runs: [], run: null, simulationId: null,
     snapshot: null, health: null, decisions: [], events: [], productionEvents: [],
-    production: null, alerts: [], commands: [], errors: new Map(),
+    production: null, alerts: [], commands: [], replay: null, errors: new Map(),
     selected: null, selectedDecision: null, selectedCycle: null, cycleStory: null,
     view: params.get('view') || 'overview', monitorFilter: params.get('filter') || 'all',
-    decisionFilter: 'all', socket: null, reconnectDelay: 1000
+    decisionFilter: 'all', socket: null, reconnectDelay: 1000, lastSocketMessageAt: 0, dispatchBusy: false, dispatchFeedback: ''
   };
+  const cycleDisclosureStates=new Map();
   const eventOrder = ['ARRIVE_SHOVEL','QUEUE_LOAD','LOADING_START','LOADING_FINISH','ARRIVE_DUMP','QUEUE_DUMP','DUMP_START','DUMP_FINISH'];
   const eventLabels = {
     ARRIVE_SHOVEL:'到达铲装点', QUEUE_LOAD:'进入装载队列', LOADING_START:'开始装载', LOADING_FINISH:'完成装载',
     ARRIVE_DUMP:'到达卸载点', QUEUE_DUMP:'进入卸载队列', DUMP_START:'开始卸载', DUMP_FINISH:'完成卸载'
   };
-  let zoom=1, offsetX=0, offsetY=0, geometryKey='';
+  const shovelTargets=['ShovelOreHigh1','ShovelOreHigh2','ShovelOreLow','ShovelWaste'];
+  let zoom=1, offsetX=0, offsetY=0, geometryKey='',runRefreshTimer=null,snapshotRefreshTimer=null,refreshInFlight=false,snapshotInFlight=false,runRefreshToken=0,snapshotRefreshToken=0,cycleStoryRequest=0;
 
   $('user-chip').textContent = identity.username + ' · ' + identity.role;
   bindUi();
@@ -37,6 +39,7 @@ window.dispatchIdentity.then(async identity => {
     });
     $('simulation-select').onchange=()=>selectSimulation($('simulation-select').value);
     $('run-select').onchange=()=>selectRun($('run-select').value);
+    $('finish-run').onclick=finishCurrentRun;
     $('monitor-filters').querySelectorAll('button').forEach(button=>button.onclick=()=>{model.monitorFilter=button.dataset.filter;renderMonitor();syncFilters();});
     $('decision-filters').querySelectorAll('button').forEach(button=>button.onclick=()=>{model.decisionFilter=button.dataset.filter;renderDecisions();syncFilters();});
     $('close-detail').onclick=()=>{model.selected=null;updateUrl({vehicleId:null});renderMonitor();};
@@ -47,7 +50,7 @@ window.dispatchIdentity.then(async identity => {
     $('zoom-out').onclick=()=>setZoom(zoom/1.18);
     $('fit-map').onclick=fitMap;
     $('replay-load').onclick=loadReplay;
-    window.addEventListener('resize',()=>{if(model.view==='monitor')fitMap();});
+    window.addEventListener('resize',()=>{if(model.view==='monitor')fitMap();if(model.view==='replay'&&model.replay)renderReplay(model.replay);});
   }
 
   async function loadSimulations() {
@@ -67,6 +70,7 @@ window.dispatchIdentity.then(async identity => {
 
   async function selectSimulation(simulationId) {
     model.simulationId=simulationId;
+    stopRunRefresh();
     closeSocket();
     showLoading('正在读取 Run 列表');
     model.runs=await api('/api/v1/runs?simulationId='+encodeURIComponent(simulationId));
@@ -80,12 +84,12 @@ window.dispatchIdentity.then(async identity => {
     const chosen=model.runs.find(run=>run.run_id===requested) || active || model.runs[0];
     $('run-select').value=chosen.run_id;
     await selectRun(chosen.run_id);
-    connectWebSocket();
   }
 
   async function selectRun(runId) {
     const run=model.runs.find(item=>item.run_id===runId);
     if (!run) return;
+    stopRunRefresh();closeSocket();
     const restoringInitialRun=model.run==null;
     model.run=run;
     clearRunData();
@@ -96,15 +100,16 @@ window.dispatchIdentity.then(async identity => {
     const start=Number(run.started_at_ms), end=run.ended_at_ms==null?Infinity:Number(run.ended_at_ms);
     const tasks=[
       collect('health','/api/v1/health'),
-      collect('events','/api/v1/runs/'+enc(runId)+'/events?limit=500'),
+      collect('events','/api/v1/runs/'+enc(runId)+'/events?limit=500&latest=true'),
       collect('production','/api/v1/runs/'+enc(runId)+'/production/summary'),
-      collect('productionEvents','/api/v1/runs/'+enc(runId)+'/production/events?limit=1000'),
+      collect('productionEvents','/api/v1/runs/'+enc(runId)+'/production/events?limit=1000&latest=true'),
       collect('decisions','/api/v1/simulations/'+enc(model.simulationId)+'/decisions?limit=500'),
       collect('alerts','/api/v1/simulations/'+enc(model.simulationId)+'/alerts?limit=100'),
       collect('commands','/api/v1/simulations/'+enc(model.simulationId)+'/manual-dispatch?limit=200')
     ];
     if(active) tasks.push(collect('snapshot','/api/v1/simulations/'+enc(model.simulationId)+'/snapshot'));
     await Promise.all(tasks);
+    if(active)model.snapshot=projectSnapshotForRun(model.snapshot,run);
     model.decisions=(model.decisions||[]).filter(item=>item.createdAtMs>=start&&item.createdAtMs<end);
     model.commands=(model.commands||[]).filter(item=>item.requestedAtMs>=start&&item.requestedAtMs<end);
     model.alerts=(model.alerts||[]).filter(item=>item.createdAtMs>=start&&item.createdAtMs<end);
@@ -114,12 +119,73 @@ window.dispatchIdentity.then(async identity => {
     renderAll();
     hidePageState();
     if(model.selectedCycle) loadCycleStory(model.selectedCycle);
+    if(isActive()){connectWebSocket();startRunRefresh();startSnapshotRefresh();}
+  }
+
+  function startRunRefresh(){stopRunRefresh();runRefreshTimer=setInterval(refreshActiveRun,5000);}
+  function startSnapshotRefresh(){stopSnapshotRefresh();refreshActiveSnapshot();snapshotRefreshTimer=setInterval(refreshActiveSnapshot,5000);}
+  function stopSnapshotRefresh(){if(snapshotRefreshTimer){clearInterval(snapshotRefreshTimer);snapshotRefreshTimer=null;}snapshotRefreshToken++;snapshotInFlight=false;}
+  function stopRunRefresh(){if(runRefreshTimer){clearInterval(runRefreshTimer);runRefreshTimer=null;}runRefreshToken++;refreshInFlight=false;stopSnapshotRefresh();}
+
+  async function refreshActiveSnapshot(){
+    if(snapshotInFlight||!isActive()||Date.now()-model.lastSocketMessageAt<5000)return;snapshotInFlight=true;const token=snapshotRefreshToken,runId=model.run.run_id;
+    try{const snapshot=await api('/api/v1/simulations/'+enc(model.simulationId)+'/snapshot');if(token!==snapshotRefreshToken||model.run?.run_id!==runId||!isActive())return;model.snapshot=projectSnapshotForRun(snapshot,model.run);model.errors.delete('snapshot');renderAll();}
+    catch(error){if(token===snapshotRefreshToken){model.errors.set('snapshot',error.message);renderAll();}}
+    finally{if(token===snapshotRefreshToken)snapshotInFlight=false;}
+  }
+
+  function projectSnapshotForRun(snapshot,run){
+    if(!snapshot||!run)return snapshot;
+    const start=Number(run.started_at_ms),end=run.ended_at_ms==null?Infinity:Number(run.ended_at_ms);
+    const inRun=item=>Number(item.receivedAtMs)>=start&&Number(item.receivedAtMs)<=end;
+    return {...snapshot,vehicles:(snapshot.vehicles||[]).filter(inRun),shovels:(snapshot.shovels||[]).filter(inRun)};
+  }
+
+  async function refreshActiveRun(){
+    if(refreshInFlight||!isActive())return;refreshInFlight=true;
+    const token=runRefreshToken;
+    try{
+      const runs=await api('/api/v1/runs?simulationId='+enc(model.simulationId));
+      if(token!==runRefreshToken)return;
+      const latestRun=runs.find(item=>item.run_id===model.run.run_id);
+      model.runs=runs;
+      if(latestRun){model.run=latestRun;$('run-select').replaceChildren(...runs.map(item=>option(item.run_id,runLabel(item))));$('run-select').value=latestRun.run_id;}
+      if(!isActive()){stopRunRefresh();closeSocket();renderAll();return;}
+      const lastEvent=model.events.at(-1),afterMs=lastEvent?Math.max(0,Number(lastEvent.wall_time_ms)-5000):0;
+      const [events,productionEvents,production,snapshot]=await Promise.all([
+        api('/api/v1/runs/'+enc(model.run.run_id)+'/events?limit=500&afterMs='+afterMs+'&afterId='),
+        api('/api/v1/runs/'+enc(model.run.run_id)+'/production/events?limit=1000&latest=true'),
+        api('/api/v1/runs/'+enc(model.run.run_id)+'/production/summary'),
+        api('/api/v1/simulations/'+enc(model.simulationId)+'/snapshot')
+      ]);
+      if(token!==runRefreshToken)return;
+      model.events=mergeRunEvents(model.events,events);model.productionEvents=productionEvents;model.production=production;model.snapshot=projectSnapshotForRun(snapshot,model.run);model.errors.delete('refresh');model.errors.delete('snapshot');
+      renderAll();if(model.selectedCycle)loadCycleStory(model.selectedCycle);
+    }catch(error){model.errors.set('refresh',error.message);renderAll();}
+    finally{if(token===runRefreshToken)refreshInFlight=false;}
+  }
+
+  async function finishCurrentRun(){
+    if(!isActive())return;
+    if(!confirm('确认结束当前 Run？结束后实时监控停止，记录转为历史只读。'))return;
+    $('finish-run').disabled=true;
+    try{
+      const samples=[...(model.snapshot?.vehicles||[]),...(model.snapshot?.shovels||[]),...(model.productionEvents||[])].map(item=>Number(item.simTimeSeconds)).filter(finite);
+      samples.push(...(model.events||[]).map(item=>Number(item.sim_time_seconds)).filter(finite));
+      const ended=await api('/api/v1/runs/'+enc(model.run.run_id)+'/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({simulationEndSeconds:samples.length?Math.max(...samples):null})});
+      model.run=ended;model.runs=model.runs.map(item=>item.run_id===ended.run_id?ended:item);
+      $('run-select').replaceChildren(...model.runs.map(item=>option(item.run_id,runLabel(item))));$('run-select').value=ended.run_id;
+      stopRunRefresh();closeSocket();renderAll();
+    }catch(error){$('footer-status').textContent='结束 Run 失败 · '+error.message;}
+    finally{$('finish-run').disabled=false;}
   }
 
   function clearRunData() {
+    cycleStoryRequest++;
     model.snapshot=null;model.health=null;model.decisions=[];model.events=[];model.productionEvents=[];
-    model.production=null;model.alerts=[];model.commands=[];model.errors.clear();model.selected=null;
+    model.production=null;model.alerts=[];model.commands=[];model.replay=null;model.errors.clear();model.selected=null;
     model.selectedDecision=null;model.selectedCycle=null;model.cycleStory=null;geometryKey='';
+    cycleDisclosureStates.clear();$('cycle-detail').dataset.markup='';$('cycle-detail').dataset.cycleKey='';
   }
 
   async function collect(key,url) {
@@ -129,27 +195,35 @@ window.dispatchIdentity.then(async identity => {
 
   function setView(view) {
     if(!['overview','monitor','decision','cycle','replay'].includes(view))view='overview';
+    const changed=model.view!==view;
     model.view=view;
     document.querySelectorAll('.view').forEach(node=>node.classList.toggle('active',node.dataset.view===view));
     $('main-nav').querySelectorAll('button').forEach(node=>node.classList.toggle('active',node.dataset.view===view));
     updateUrl({view});
     syncFilters();
-    if(view==='monitor'){renderMonitor();requestAnimationFrame(fitMap);}
+    if(view==='overview')renderOverview();
+    if(view==='monitor'){renderMonitor();if(changed)requestAnimationFrame(fitMap);}
     if(view==='decision')renderDecisions();
     if(view==='cycle')renderCycles();
   }
 
   function renderAll() {
-    renderTopbar();renderOverview();renderMonitor();renderDecisions();renderCycles();setView(model.view);
+    renderTopbar();
+    if(model.view==='overview')renderOverview();
+    if(model.view==='monitor')renderMonitor();
+    if(model.view==='decision')renderDecisions();
+    if(model.view==='cycle')renderCycles();
     $('footer-status').textContent=model.errors.size?'部分接口失败：'+[...model.errors.keys()].join(' / '):'证据读取完成 · '+formatWall(Date.now());
   }
 
   function renderTopbar() {
     const active=isActive(), snapshot=active?model.snapshot:null;
+    $('finish-run').hidden=!active;
     const simTimes=[
       ...(snapshot?.vehicles||[]).map(x=>x.simTimeSeconds),
       ...(snapshot?.shovels||[]).map(x=>x.simTimeSeconds),
-      ...(model.productionEvents||[]).map(x=>x.simTimeSeconds)
+      ...(model.productionEvents||[]).map(x=>x.simTimeSeconds),
+      ...(model.events||[]).map(x=>x.sim_time_seconds)
     ].filter(finite);
     $('sim-time').textContent=simTimes.length?Math.max(...simTimes).toFixed(1)+' s':'未采集';
     setHealth($('mqtt-health'),model.health?.mqttConnected===true,'MQTT '+(model.health?.mqttConnected===true?'已连接':model.health?'未连接':'未知'));
@@ -232,39 +306,48 @@ window.dispatchIdentity.then(async identity => {
   function renderMonitor() {
     syncFilters();
     const root=$('object-list'),active=isActive(),snapshot=active?model.snapshot:null;
-    if(!active){root.className='object-list empty';root.textContent='历史 Run 不展示当前现场状态，请进入历史回放。';setText('object-count','历史只读');clearMap();renderObjectDetail();return;}
-    if(!snapshot){root.className='object-list empty';root.textContent=model.errors.get('snapshot')||'等待现场状态';setText('object-count','--');clearMap();renderObjectDetail();return;}
+    if(!active){root.dataset.membership='';root.className='object-list empty';root.textContent='历史 Run 不展示当前现场状态，请进入历史回放。';setText('object-count','历史只读');clearMap();renderObjectDetail();return;}
+    if(!snapshot){root.dataset.membership='';root.className='object-list empty';root.textContent=model.errors.get('snapshot')||'等待现场状态';setText('object-count','--');clearMap();renderObjectDetail();return;}
     const vehicles=(snapshot.vehicles||[]).filter(matchMonitor),shovels=(snapshot.shovels||[]).filter(matchMonitor);
     setText('object-count',(vehicles.length+shovels.length)+' 个对象');
-    root.className='object-list';root.replaceChildren();
-    appendObjectGroup(root,'车辆',vehicles,'vehicle');appendObjectGroup(root,'铲装点',shovels,'shovel');
+    root.className='object-list';
+    const membership=vehicles.map(x=>'v'+x.vehicleId).concat(shovels.map(x=>'s'+x.shovelId)).join(',');
+    if(root.dataset.membership!==membership){root.replaceChildren();appendObjectGroup(root,'车辆',vehicles,'vehicle');appendObjectGroup(root,'铲装点',shovels,'shovel');root.dataset.membership=membership;}
+    root.querySelectorAll('.object-row').forEach(row=>{
+      const items=row.dataset.type==='vehicle'?vehicles:shovels,item=items.find(x=>Number(x.vehicleId??x.shovelId)===Number(row.dataset.id));
+      if(!item)return;const vehicle=row.dataset.type==='vehicle';
+      row.classList.toggle('selected',model.selected?.type===row.dataset.type&&model.selected.id===Number(row.dataset.id));
+      row.classList.toggle('stale',Boolean(item.stale));
+      row.querySelector('small').textContent=item.stale?'状态失联':vehicle?(isTravelling(item)?'行驶中':item.statechartState||'UNKNOWN'):(item.busy?'作业中':item.available?'可用':'不可用');
+      row.lastElementChild.textContent=vehicle?(item.stale?'--':num(item.speedMps,1)+' m/s'):'等待 '+(item.stale?'--':item.waitingTrucks);
+    });
     renderGeometry(snapshot.map);renderMarkers(vehicles,shovels);renderObjectDetail();
   }
 
   function matchMonitor(item) {
     const filter=model.monitorFilter;if(filter==='all')return true;if(filter==='stale')return item.stale===true;if(filter==='online')return !item.stale;
     const state=String(item.statechartState||'').toLowerCase();
-    if(filter==='running')return !item.stale&&/(move|travel|route|haul)/.test(state);
+    if(filter==='running')return !item.stale&&isTravelling(item);
     if(filter==='waiting')return !item.stale&&(/(wait|queue|idle)/.test(state)||item.waitingTrucks>0);
     return true;
   }
 
   function appendObjectGroup(root,label,items,type) {
     if(!items.length)return;const title=document.createElement('div');title.className='object-group';title.textContent=label+' · '+items.length;root.appendChild(title);
-    items.forEach(item=>{const id=type==='vehicle'?item.vehicleId:item.shovelId,row=document.createElement('button');row.className='object-row'+(item.stale?' stale':'')+(model.selected?.type===type&&model.selected.id===id?' selected':'');
-      const vehicle=type==='vehicle';row.innerHTML='<span class="object-symbol '+(vehicle?(item.loaded?'loaded':''):'shovel')+'"><i>'+(vehicle?'T':id)+'</i></span><span><b>'+(vehicle?'车辆 T'+id:esc(item.shovelName||'铲装点 '+id))+'</b><small>'+(item.stale?'状态失联':vehicle?esc(item.statechartState||'UNKNOWN'):(item.busy?'作业中':item.available?'可用':'不可用'))+'</small></span><span>'+(vehicle?(item.stale?'--':num(item.speedMps,1)+' m/s'):'等待 '+(item.stale?'--':item.waitingTrucks))+'</span>';
-      row.onclick=()=>selectObject(type,id);root.appendChild(row);});
+    items.forEach(item=>{const id=type==='vehicle'?item.vehicleId:item.shovelId,row=document.createElement('button');row.className='object-row'+(item.stale?' stale':'')+(model.selected?.type===type&&Number(model.selected.id)===Number(id)?' selected':'');
+      const vehicle=type==='vehicle';row.innerHTML='<span class="object-symbol '+(vehicle?(item.loaded?'loaded':''):'shovel')+'"><i>'+(vehicle?'T':id)+'</i></span><span><b>'+(vehicle?'车辆 T'+id:esc(item.shovelName||'铲装点 '+id))+'</b><small>'+(item.stale?'状态失联':vehicle?(isTravelling(item)?'行驶中':esc(item.statechartState||'UNKNOWN')):(item.busy?'作业中':item.available?'可用':'不可用'))+'</small></span><span>'+(vehicle?(item.stale?'--':num(item.speedMps,1)+' m/s'):'等待 '+(item.stale?'--':item.waitingTrucks))+'</span>';
+      row.dataset.type=type;row.dataset.id=id;row.onclick=()=>selectObject(type,id);root.appendChild(row);});
   }
 
-  function selectObject(type,id) {model.selected={type,id};updateUrl(type==='vehicle'?{vehicleId:id}:{vehicleId:null});renderMonitor();}
+  function selectObject(type,id) {model.dispatchFeedback='';model.selected={type,id:Number(id)};updateUrl(type==='vehicle'?{vehicleId:id}:{vehicleId:null});$('detail-body').hidden=false;$('detail-empty').hidden=true;renderMonitor();}
   function restoreSelected(){const id=Number(params.get('vehicleId'));return Number.isInteger(id)?{type:'vehicle',id}:null;}
 
   function renderObjectDetail() {
     const body=$('detail-body'),empty=$('detail-empty'),item=getSelected();
-    body.hidden=!item;empty.hidden=Boolean(item);if(!item){$('detail-title').textContent='对象详情';return;}
+    body.hidden=!item;empty.hidden=Boolean(item);if(!item){$('detail-title').textContent='任务指派 / 对象详情';renderManualDispatch(null);return;}
     const vehicle=model.selected.type==='vehicle';$('detail-title').textContent=vehicle?'车辆 T'+item.vehicleId:(item.shovelName||'铲装点 '+item.shovelId);
     const status=$('detail-status');status.className='detail-status'+(item.stale?' stale':'');
-    status.textContent=item.stale?'状态失联 · 最后接收 '+formatWall(item.receivedAtMs)+' · 数据年龄 '+age(item.receivedAtMs):vehicle?(item.statechartState||'UNKNOWN'):(item.busy?'作业中':item.available?'可用':'不可用');
+    status.textContent=item.stale?'状态失联 · 最后接收 '+formatWall(item.receivedAtMs)+' · 数据年龄 '+age(item.receivedAtMs):vehicle?(isTravelling(item)?'行驶中 · '+(item.statechartState||'状态未命名'):(item.statechartState||'UNKNOWN')):(item.busy?'作业中':item.available?'可用':'不可用');
     const fields=vehicle?[
       ['业务时间',unit(item.simTimeSeconds,'s',1)],['坐标',num(item.x,1)+', '+num(item.y,1)],['速度',item.stale?'--':unit(item.speedMps,'m/s',2)],
       ['载荷',(item.stale?'最后值 · ':'')+unit(item.payloadTons,'t',1)+' · '+(item.loaded?'载重':'空载')],['当前节点',item.currentNode||'未采集'],
@@ -280,17 +363,24 @@ window.dispatchIdentity.then(async identity => {
   }
 
   function renderManualDispatch(vehicle) {
-    const panel=document.querySelector('.manual-dispatch');panel.hidden=!vehicle;if(!vehicle)return;
+    const panel=document.querySelector('.manual-dispatch');panel.hidden=false;
+    if(!vehicle){$('dispatch-target').replaceChildren(option('','请先选择车辆'));$('dispatch-submit').disabled=true;$('dispatch-status').textContent='从左侧列表或地图选择车辆后，选择目标并确认下发';return;}
     const targets=vehicle.loaded?[['Crusher','Crusher 矿石破碎站'],['dumpNode','dumpNode 排土场']]:[['ShovelOreHigh1','ShovelOreHigh1 (HG1)'],['ShovelOreHigh2','ShovelOreHigh2 (HG2)'],['ShovelOreLow','ShovelOreLow (LG)'],['ShovelWaste','ShovelWaste (WASTE)']];
     const mapNodes=new Set((model.snapshot?.map?.nodes||[]).map(x=>x.nodeId));
     const available=targets.filter(x=>x[0]!==vehicle.destinationNode&&(!mapNodes.size||mapNodes.has(x[0])));
-    const previous=$('dispatch-target').value;$('dispatch-target').replaceChildren(...available.map(x=>option(x[0],x[1])));if(available.some(x=>x[0]===previous))$('dispatch-target').value=previous;
+    const previous=$('dispatch-target').value;if([...$('dispatch-target').options].map(x=>x.value).join('|')!==available.map(x=>x[0]).join('|'))$('dispatch-target').replaceChildren(...available.map(x=>option(x[0],x[1])));if(available.some(x=>x[0]===previous))$('dispatch-target').value=previous;
     const commands=model.commands.filter(x=>x.vehicleId===vehicle.vehicleId).sort((a,b)=>b.requestedAtMs-a.requestedAtMs);
     const active=commands.find(x=>['CREATED','SENT'].includes(x.status));
-    const travelling=/^(PrepareRoute|MoveSegment|ArriveSegmentEnd|CheckDestination|TravelToLoadSite|TravelToDumpSite)/.test(vehicle.statechartState||'');
-    $('dispatch-submit').disabled=vehicle.stale||!travelling||Boolean(active)||!available.length;
-    $('dispatch-status').textContent=vehicle.stale?'车辆失联，禁止下发':!travelling?'车辆非行驶态，不能改派':active?'等待现场结果 · '+shortId(active.commandId):!available.length?'没有可选的兼容目标':'可下发 · 最终以服务端校验为准';
+    const travelling=isTravelling(vehicle);
+    $('dispatch-submit').disabled=model.dispatchBusy||vehicle.stale||!travelling||Boolean(active)||!available.length;
+    $('dispatch-status').textContent=model.dispatchFeedback|| (vehicle.stale?'车辆失联，禁止下发':!travelling?'车辆非行驶态，不能改派':active?'等待现场结果 · '+shortId(active.commandId):!available.length?'没有可选的兼容目标':'可下发 · 最终以服务端校验为准');
     $('dispatch-history').innerHTML=commands.slice(0,6).map(x=>'<div><span>'+formatWall(x.requestedAtMs)+' · '+esc(x.previousDestinationNode||'未知')+' → '+esc(x.targetNode)+'</span><b class="status-'+String(x.status).toLowerCase()+'">'+esc(x.status)+'</b></div>').join('')||'<div><span>暂无人工改派记录</span></div>';
+  }
+
+  function isTravelling(vehicle){
+    const phase=String(vehicle.statechartState||'');
+    return /^(PrepareRoute|MoveSegment|ArriveSegmentEnd|CheckDestination|TravelToLoadSite|TravelToDumpSite)/.test(phase)
+      ||Number(vehicle.speedMps)>0.1;
   }
 
   async function submitManualDispatch() {
@@ -298,12 +388,13 @@ window.dispatchIdentity.then(async identity => {
     const target=$('dispatch-target').value;if(!target)return;
     const message='确认人工改派？\n\n车辆：T'+vehicle.vehicleId+'\n原目标：'+(vehicle.destinationNode||'未知')+'\n新目标：'+target+'\n当前状态：'+(vehicle.statechartState||'UNKNOWN')+'\n\n现场将在当前物理路段终点应用改派，不会瞬移。';
     if(!confirm(message))return;
-    $('dispatch-submit').disabled=true;$('dispatch-status').textContent='正在创建并发布 Command…';
+    model.dispatchBusy=true;model.dispatchFeedback='正在创建并发布 Command…';$('dispatch-submit').disabled=true;$('dispatch-status').textContent=model.dispatchFeedback;
     try {
       const command=await api('/api/v1/simulations/'+enc(model.simulationId)+'/manual-dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({vehicleId:vehicle.vehicleId,targetNode:target})},true);
-      model.commands.unshift(command);$('dispatch-status').textContent=command.status==='SENT'?'已发送，等待现场回执 · '+shortId(command.commandId):command.status+' · '+(command.statusMessage||'');
+      upsert(model.commands,'commandId',command);model.dispatchFeedback=command.status==='SENT'?'已发送，等待现场回执 · '+shortId(command.commandId):command.status+' · '+(command.statusMessage||'');
       await collect('decisions','/api/v1/simulations/'+enc(model.simulationId)+'/decisions?limit=500');
-    } catch(error){$('dispatch-status').textContent='下发失败 · '+error.message;}
+    } catch(error){model.dispatchFeedback='下发失败 · '+error.message;}
+    finally{model.dispatchBusy=false;}
     renderManualDispatch(vehicle);renderDecisions();
   }
 
@@ -316,14 +407,22 @@ window.dispatchIdentity.then(async identity => {
     $('mine-image').width=map.imageWidthPx;$('mine-image').height=map.imageHeightPx;
     const nodes=new Map((map.nodes||[]).map(x=>[x.nodeId,x])),svg=$('road-layer');svg.setAttribute('width',map.imageWidthPx);svg.setAttribute('height',map.imageHeightPx);svg.setAttribute('viewBox','0 0 '+map.imageWidthPx+' '+map.imageHeightPx);svg.replaceChildren();
     (map.segments||[]).forEach(segment=>{const from=nodes.get(segment.fromNodeId),to=nodes.get(segment.toNodeId);if(!from||!to)return;const line=document.createElementNS('http://www.w3.org/2000/svg','line');attrs(line,{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:'road'+(segment.closed?' closed':'')});svg.appendChild(line);});
-    (map.nodes||[]).forEach(node=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');attrs(circle,{cx:node.x,cy:node.y,r:3,class:'road-node'});svg.appendChild(circle);if(/Crusher|Shovel|dump/i.test(node.nodeId)){const label=document.createElementNS('http://www.w3.org/2000/svg','text');attrs(label,{x:node.x+6,y:node.y-6,class:'node-label'});label.textContent=node.nodeId;svg.appendChild(label);}});
+    (map.nodes||[]).forEach(node=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');attrs(circle,{cx:node.x,cy:node.y,r:3,class:'road-node'});svg.appendChild(circle);if(/Crusher|Shovel|dump/i.test(node.nodeId)){const label=document.createElementNS('http://www.w3.org/2000/svg','text');attrs(label,{x:node.x+6,y:node.y-6,class:'node-label'});label.textContent=node.nodeId;label.style.pointerEvents='auto';label.style.cursor='pointer';label.addEventListener('click',event=>{event.stopPropagation();selectMapTarget(node.nodeId);});svg.appendChild(label);}});
     requestAnimationFrame(fitMap);
   }
 
   function renderMarkers(vehicles,shovels) {
-    const vl=$('vehicle-layer'),sl=$('shovel-layer');vl.replaceChildren();sl.replaceChildren();
-    vehicles.forEach(x=>{const node=document.createElement('div');node.className='vehicle-marker'+(x.loaded?' loaded':'')+(x.stale?' stale':'')+(model.selected?.type==='vehicle'&&model.selected.id===x.vehicleId?' selected':'');node.dataset.label='T'+x.vehicleId;node.style.left=x.x+'px';node.style.top=x.y+'px';node.title='T'+x.vehicleId+' · '+(x.stale?'状态失联':num(x.speedMps,1)+' m/s');node.onclick=()=>selectObject('vehicle',x.vehicleId);vl.appendChild(node);});
-    shovels.forEach(x=>{const node=document.createElement('div');node.className='shovel-marker'+(x.stale?' stale':'');node.style.left=x.x+'px';node.style.top=x.y+'px';node.innerHTML='<i>'+x.shovelId+'</i>';node.title=x.shovelName||'铲装点 '+x.shovelId;node.onclick=()=>selectObject('shovel',x.shovelId);sl.appendChild(node);});
+    const vl=$('vehicle-layer'),sl=$('shovel-layer');for(const node of vl.children)if(!vehicles.some(v=>String(v.vehicleId)===node.dataset.id))node.remove();for(const node of sl.children)if(!shovels.some(v=>String(v.shovelId)===node.dataset.id))node.remove();
+    vehicles.forEach(x=>{const node=[...vl.children].find(n=>n.dataset.id===String(x.vehicleId))||document.createElement('button');node.dataset.id=x.vehicleId;node.type='button';node.className='vehicle-marker'+(x.loaded?' loaded':'')+(x.stale?' stale':'')+(model.selected?.type==='vehicle'&&Number(model.selected.id)===Number(x.vehicleId)?' selected':'');node.dataset.label='T'+x.vehicleId;node.style.left=x.x+'px';node.style.top=x.y+'px';node.title='选择车辆 T'+x.vehicleId+' · '+(x.stale?'状态失联':num(x.speedMps,1)+' m/s');node.setAttribute('aria-label',node.title+'，打开车辆详情和改派操作');node.onclick=event=>{event.preventDefault();event.stopPropagation();selectObject('vehicle',x.vehicleId);};if(!node.parentNode)vl.appendChild(node);});
+    shovels.forEach(x=>{const node=[...sl.children].find(n=>n.dataset.id===String(x.shovelId))||document.createElement('button');node.dataset.id=x.shovelId;node.type='button';const target=shovelTargets[x.shovelId];const selectedTarget=model.selected?.type==='vehicle'&&$('dispatch-target').value===target;node.className='shovel-marker'+(x.stale?' stale':'')+(selectedTarget?' target-selected':'');node.style.left=x.x+'px';node.style.top=x.y+'px';node.innerHTML='<i>'+x.shovelId+'</i>';node.title=model.selected?.type==='vehicle'?'选择 '+(target||'铲装点')+' 作为改派目标':(x.shovelName||'铲装点 '+x.shovelId);node.setAttribute('aria-label',node.title);node.onclick=()=>{if(model.selected?.type==='vehicle'){selectMapTarget(target);return;}selectObject('shovel',x.shovelId);};if(!node.parentNode)sl.appendChild(node);});
+  }
+
+  function selectMapTarget(target){
+    if(model.selected?.type!=='vehicle')return false;
+    const vehicle=getSelected(),select=$('dispatch-target');
+    if(!vehicle)return true;
+    if(![...select.options].some(item=>item.value===target)){$('dispatch-status').textContent='地图目标与车辆载荷不兼容，或目标不在当前地图';return true;}
+    select.value=target;renderMonitor();$('dispatch-status').textContent='地图已选目标 · '+target+' · 确认后发送改派';return true;
   }
   function clearMap(){$('world').hidden=true;$('empty-map').hidden=false;$('vehicle-layer').replaceChildren();$('shovel-layer').replaceChildren();}
   function fitMap(){const map=model.snapshot?.map,viewport=$('map-viewport');if(!map||!viewport.clientWidth)return;zoom=Math.min(viewport.clientWidth/map.imageWidthPx,viewport.clientHeight/map.imageHeightPx);offsetX=(viewport.clientWidth-map.imageWidthPx*zoom)/2;offsetY=(viewport.clientHeight-map.imageHeightPx*zoom)/2;applyTransform();}
@@ -369,7 +468,8 @@ window.dispatchIdentity.then(async identity => {
 
   function cycleGroups() {
     const map=new Map();(model.productionEvents||[]).forEach(event=>{if(!map.has(event.cycleId))map.set(event.cycleId,{cycleId:event.cycleId,vehicleId:event.vehicleId,events:[]});map.get(event.cycleId).events.push(event);});
-    return [...map.values()].map(group=>{group.events.sort((a,b)=>a.simTimeSeconds-b.simTimeSeconds||eventOrder.indexOf(a.eventType)-eventOrder.indexOf(b.eventType));group.present=new Set(group.events.map(x=>x.eventType));group.complete=eventOrder.every(x=>group.present.has(x));group.ordered=group.events.every((x,i,a)=>i===0||x.simTimeSeconds>=a[i-1].simTimeSeconds);return group;}).sort((a,b)=>(b.events.at(-1)?.simTimeSeconds||0)-(a.events.at(-1)?.simTimeSeconds||0));
+    return [...map.values()].map(group=>{group.events.sort((a,b)=>a.simTimeSeconds-b.simTimeSeconds||eventOrder.indexOf(a.eventType)-eventOrder.indexOf(b.eventType));group.present=new Set(group.events.map(x=>x.eventType));group.complete=eventOrder.every(x=>group.present.has(x));const semanticEvents=group.events.filter(x=>eventOrder.includes(x.eventType)).sort((a,b)=>eventOrder.indexOf(a.eventType)-eventOrder.indexOf(b.eventType));
+      group.ordered=semanticEvents.every((x,i,a)=>finite(x.simTimeSeconds)&&(i===0||x.simTimeSeconds>=a[i-1].simTimeSeconds));return group;}).sort((a,b)=>(b.events.at(-1)?.simTimeSeconds||0)-(a.events.at(-1)?.simTimeSeconds||0));
   }
   function findCyclesForVehicle(id){return cycleGroups().filter(x=>x.vehicleId===id);}
 
@@ -377,43 +477,70 @@ window.dispatchIdentity.then(async identity => {
     const root=$('cycle-list'),groups=cycleGroups();setText('cycle-count',groups.length+' 个');
     if(!groups.length){root.className='cycle-list empty';root.textContent=model.errors.get('productionEvents')||'当前 Run 尚无生产事件';renderCycleDetail();return;}
     if(!groups.some(x=>x.cycleId===model.selectedCycle))model.selectedCycle=groups[0].cycleId;
-    root.className='cycle-list';root.innerHTML=groups.map(x=>'<button class="cycle-row '+(x.cycleId===model.selectedCycle?'selected':'')+'" data-id="'+esc(x.cycleId)+'"><span class="row-top"><b>T'+x.vehicleId+' · '+esc(shortId(x.cycleId))+'</b><em>'+x.events.length+'/8 事件</em></span><span class="progress"><i style="width:'+Math.min(100,x.events.length/8*100)+'%"></i></span><span class="row-meta"><span>'+(x.complete&&x.ordered?'作业阶段完整':'证据不完整')+'</span><span>'+cycleDuration(x)+'</span></span></button>').join('');
+    root.className='cycle-list';root.innerHTML=groups.map(x=>'<button class="cycle-row '+(x.cycleId===model.selectedCycle?'selected':'')+'" data-id="'+esc(x.cycleId)+'"><span class="row-top"><b>T'+x.vehicleId+' · '+esc(shortId(x.cycleId))+'</b><em>'+x.events.filter(e=>eventOrder.includes(e.eventType)).length+'/8 作业事件</em></span><span class="progress"><i style="width:'+Math.min(100,x.events.filter(e=>eventOrder.includes(e.eventType)).length/8*100)+'%"></i></span><span class="row-meta"><span>'+(x.complete&&x.ordered?'作业阶段完整':'证据不完整')+'</span><span>'+cycleDuration(x)+'</span></span></button>').join('');
     root.querySelectorAll('button').forEach(button=>button.onclick=()=>{model.selectedCycle=button.dataset.id;updateUrl({cycleId:model.selectedCycle});renderCycles();loadCycleStory(model.selectedCycle);});
     renderCycleDetail();
   }
 
   async function loadCycleStory(cycleId) {
-    if(!cycleId||!model.run)return;model.cycleStory=null;renderCycleDetail();
-    try{model.cycleStory=await api('/api/v1/runs/'+enc(model.run.run_id)+'/cycles/'+enc(cycleId)+'/story');}
-    catch(error){model.errors.set('cycleStory',error.message);}
+    if(!cycleId||!model.run)return;const request=++cycleStoryRequest;
+    if(model.cycleStory?.cycleId!==cycleId)model.cycleStory=null;renderCycleDetail();
+    try{const story=await api('/api/v1/runs/'+enc(model.run.run_id)+'/cycles/'+enc(cycleId)+'/story');if(request!==cycleStoryRequest||cycleId!==model.selectedCycle)return;model.cycleStory=story;model.errors.delete('cycleStory');}
+    catch(error){if(request!==cycleStoryRequest)return;model.errors.set('cycleStory',error.message);}
     renderCycleDetail();
   }
 
   function renderCycleDetail() {
     const root=$('cycle-detail'),group=cycleGroups().find(x=>x.cycleId===model.selectedCycle);
-    if(!group){root.className='detail-empty';root.textContent='选择 Cycle 查看事件完整性';setQuality($('cycle-quality'),'unknown','UNKNOWN');return;}
-    setQuality($('cycle-quality'),group.complete&&group.ordered?'partial':'insufficient',group.complete&&group.ordered?'PARTIAL':'INSUFFICIENT');
+    if(!group){root.className='detail-empty';root.textContent='选择 Cycle 查看事件完整性';root.dataset.markup='';setQuality($('cycle-quality'),'unknown','UNKNOWN');return;}
+    setQuality($('cycle-quality'),model.cycleStory?.fullCycleComplete?'complete':group.complete&&group.ordered?'partial':'insufficient',model.cycleStory?.fullCycleComplete?'COMPLETE':group.complete&&group.ordered?'PARTIAL':'INSUFFICIENT');
     const byType=new Map(group.events.map(x=>[x.eventType,x]));
     const timeline=[
-      ['UNLOAD_FINISHED_PREVIOUS','上次卸载完成（循环起点）',null,'冻结版完整循环起点未形成关联'],
-      ['DISPATCH_TRIGGERED','调度触发',null,model.cycleStory?.taskDecisions?.length?'存在显式 Command 决策引用，但未采集为周期源事件':'未采集为周期源事件'],
-      ['HAUL_EMPTY_START','空载运输开始',null,'未采集'],
+      ['UNLOAD_FINISHED_PREVIOUS','上次卸载完成（前周期引用）',model.cycleStory?.previousUnload,'前周期引用状态：'+(model.cycleStory?.previousCycleStatus||'读取中')],
+      ['DISPATCH_TRIGGERED','调度指令与执行回执',null,model.cycleStory?.taskDecisions?.length?'已关联 '+model.cycleStory.taskDecisions.length+' 条指令，见下方可展开证据；不冒充生产事件':'未关联到调度指令证据'],
+      ['HAUL_EMPTY_START','空载运输开始',byType.get('HAUL_EMPTY_START'),'旧数据或本轮尚未采集实际出发事件'],
       ...eventOrder.map(type=>[type,eventLabels[type],byType.get(type),null]),
-      ['HAUL_FULL_START','满载运输开始',null,'未采集为独立事件']
+      ['HAUL_FULL_START','满载运输开始',byType.get('HAUL_FULL_START'),'旧数据或本轮尚未采集实际出发事件']
     ];
     timeline.sort((a,b)=>timelineRank(a[0])-timelineRank(b[0]));
+    const stateKey=model.run.run_id+':'+group.cycleId;
+    if(root.dataset.cycleKey){
+      const states=cycleDisclosureStates.get(root.dataset.cycleKey)||new Map();
+      root.querySelectorAll('details[data-disclosure]').forEach(node=>states.set(node.dataset.disclosure,node.open));
+      cycleDisclosureStates.set(root.dataset.cycleKey,states);
+    }
+    root.dataset.cycleKey=stateKey;
+    const scrollTop=root.scrollTop;
     root.className='cycle-detail';
-    root.innerHTML='<div class="cycle-header">'+
+    const markup='<div class="cycle-header">'+
       cycleFact('Cycle',group.cycleId)+cycleFact('车辆','T'+group.vehicleId)+cycleFact('关联',model.cycleStory?.association||'读取中')+cycleFact('Task','未采集 · 不以 Command 冒充')+
-      '</div><div class="timeline"><div class="timeline-section">冻结完整循环证据 / 当前作业阶段事件</div>'+
+      '</div><div class="timeline"><div class="timeline-section">完整运输证据 / 八事件装卸作业阶段</div>'+
       timeline.map(x=>timelineHtml(x[0],x[1],x[2],x[3])).join('')+
-      '<div class="timeline-section">结论：'+(group.complete&&group.ordered?'现行八事件作业阶段完整；冻结版完整运输循环仍证据不足':'作业阶段事件不完整，不能形成周期结论')+'</div></div>';
+      cycleDecisionDetails(model.cycleStory?.taskDecisions||[])+
+      '<div class="timeline-section">结论：'+(group.complete&&group.ordered?(model.cycleStory?.fullCycleComplete?'运输十事件完整，前周期与调度指令已明确关联':'八事件作业阶段完整；完整运输证据仍不足'):'作业阶段事件不完整或发生倒序，不能形成周期结论')+'</div></div>';
+    if(root.dataset.markup!==markup){
+      root.innerHTML=markup;root.dataset.markup=markup;
+      const states=cycleDisclosureStates.get(stateKey);
+      root.querySelectorAll('details[data-disclosure]').forEach(node=>{node.open=states?.get(node.dataset.disclosure)===true;});
+      root.scrollTop=scrollTop;
+    }
+  }
+
+  function cycleDecisionDetails(decisions){
+    if(!decisions.length)return '<div class="timeline-section">关联调度指令证据 · 当前周期没有可由 Command 明确关联的决策</div>';
+    return '<div class="timeline-section">关联调度指令证据 · '+decisions.length+' 条（点击展开）</div>'+decisions.map(decision=>{
+      const input=parse(decision.input),output=parse(decision.output),evidence=input?.evidenceSnapshot;
+      return '<details class="cycle-decision" data-disclosure="'+esc(decision.commandId||decision.decisionId)+'"><summary><b>'+(decision.source==='DRL_DISPATCH'?'自动派单':decision.source==='MANUAL_DISPATCH'?'人工改派':esc(decision.source||'任务决策'))+'</b><span>'+esc(shortId(decision.commandId))+' · '+esc(decision.ackStatus||'UNKNOWN')+'</span></summary>'+
+        '<dl><dt>指令生成时间</dt><dd>'+esc(formatWall(decision.createdAtMs))+'</dd><dt>指令发送时间</dt><dd>'+esc(decision.publishedAtMs?formatWall(decision.publishedAtMs):'未采集')+'</dd><dt>回执时间</dt><dd>'+esc(decision.ackAtMs?formatWall(decision.ackAtMs):'未采集')+'</dd><dt>目标</dt><dd>'+esc(output?.targetNode||'未采集')+'</dd><dt>校验</dt><dd>'+esc((decision.validationStatus||'UNKNOWN')+' · '+(decision.validationDetail||''))+'</dd><dt>回执</dt><dd>'+esc((decision.ackStatus||'UNKNOWN')+' · '+(decision.ackDetail||''))+'</dd></dl>'+
+        (evidence?'<details class="raw-evidence" data-disclosure="'+esc(decision.commandId||decision.decisionId)+':snapshot"><summary>展开派单依据快照</summary><pre>'+esc(JSON.stringify(evidence,null,2))+'</pre></details>':'')+
+        '<details class="raw-evidence" data-disclosure="'+esc(decision.commandId||decision.decisionId)+':raw"><summary>展开决策输入与输出</summary><pre>'+esc(JSON.stringify({input,output},null,2))+'</pre></details></details>';
+    }).join('');
   }
 
   function timelineRank(type){return {UNLOAD_FINISHED_PREVIOUS:0,DISPATCH_TRIGGERED:1,HAUL_EMPTY_START:2,ARRIVE_SHOVEL:3,QUEUE_LOAD:4,LOADING_START:5,LOADING_FINISH:6,HAUL_FULL_START:7,ARRIVE_DUMP:8,QUEUE_DUMP:9,DUMP_START:10,DUMP_FINISH:11}[type]??99;}
-  function timelineHtml(type,label,event,reason){return '<div class="timeline-item'+(event?'':' missing')+'"><h4>'+esc(label)+'</h4><p>'+(event?'simTime '+num(event.simTimeSeconds,2)+' s · site '+event.siteId+' · Command '+esc(shortId(event.commandId)):('数据不足 · '+esc(reason||'未采集')))+'</p></div>';}
+  function timelineHtml(type,label,event,reason){if(type==='DISPATCH_TRIGGERED'&&model.cycleStory?.taskDecisions?.length)return '<div class="timeline-item"><h4>'+esc(label)+'</h4><p>已关联 '+model.cycleStory.taskDecisions.length+' 条指令 · 下方展开生成、发送与执行回执证据（墙钟时间，不参与生产事件仿真时间排序）</p></div>';return '<div class="timeline-item'+(event?'':' missing')+'"><h4>'+esc(label)+'</h4><p>'+(event?'simTime '+num(event.simTimeSeconds,2)+' s · site '+event.siteId+' · Command '+esc(shortId(event.commandId)):('数据不足 · '+esc(reason||'未采集')))+'</p>'+(event?'<details class="raw-evidence" data-disclosure="event:'+esc(event.eventId)+'"><summary>查看源事件 · Cycle '+esc(shortId(event.cycleId))+'</summary><pre>'+esc(JSON.stringify(event,null,2))+'</pre></details>':'')+'</div>';}
   function cycleFact(label,value){return '<div><span>'+esc(label)+'</span><strong>'+esc(String(value))+'</strong></div>';}
-  function cycleDuration(group){if(group.events.length<2)return'--';return num(group.events.at(-1).simTimeSeconds-group.events[0].simTimeSeconds,1)+' s';}
+  function cycleDuration(group){if(group.events.length<2)return'已观察跨度 --';return (group.complete&&group.ordered?'作业阶段耗时 ':'已观察跨度 ')+num(group.complete&&group.ordered?group.events.find(e=>e.eventType==='DUMP_FINISH').simTimeSeconds-group.events.find(e=>e.eventType==='ARRIVE_SHOVEL').simTimeSeconds:group.events.at(-1).simTimeSeconds-group.events[0].simTimeSeconds,1)+' s';}
 
   function setReplayDefault() {
     if(!model.run)return;const end=(model.run.ended_at_ms==null?Date.now():Number(model.run.ended_at_ms))-1;$('replay-time').value=localInput(Math.max(Number(model.run.started_at_ms),end));
@@ -431,38 +558,55 @@ window.dispatchIdentity.then(async identity => {
   }
 
   function renderReplay(replay) {
+    model.replay=replay;
     const vehicles=(replay.vehicle||[]),shovels=(replay.shovel||[]),samples=[...vehicles,...shovels];
     $('replay-wall').textContent=formatWall(replay.atWallTimeMs);
     const sim=samples.map(x=>Number(x.sim_time_seconds)).filter(finite);$('replay-sim').textContent=sim.length?Math.max(...sim).toFixed(1)+' s':'未采集';
-    const stage=$('replay-stage');stage.replaceChildren();const canvas=document.createElement('div');canvas.className='replay-canvas';stage.appendChild(canvas);
-    const coords=samples.filter(x=>finite(Number(x.x))&&finite(Number(x.y))),xs=coords.map(x=>Number(x.x)),ys=coords.map(x=>Number(x.y));
-    const minX=Math.min(...xs,0),maxX=Math.max(...xs,1),minY=Math.min(...ys,0),maxY=Math.max(...ys,1);
-    coords.forEach(x=>{const isVehicle=x.vehicle_id!=null,node=document.createElement('div');node.className='replay-point'+(isVehicle?'':' shovel');node.style.left=(8+(Number(x.x)-minX)/Math.max(1,maxX-minX)*84)+'%';node.style.top=(8+(Number(x.y)-minY)/Math.max(1,maxY-minY)*84)+'%';node.textContent=isVehicle?'T'+x.vehicle_id:'S'+x.shovel_id;node.title='接收 '+formatWall(x.received_at_ms);canvas.appendChild(node);});
+    const stage=$('replay-stage');stage.replaceChildren();
+    const mapRow=(replay.map||[]).at(-1),mapState=mapRow?parse(mapRow.payload_json):null;
+    const mapWidth=Number(mapRow?.image_width_px||mapState?.imageWidthPx),mapHeight=Number(mapRow?.image_height_px||mapState?.imageHeightPx);
+    if(!mapRow||!mapState||!mapWidth||!mapHeight){const missing=document.createElement('div');missing.className='detail-empty';missing.textContent='该时刻之前没有可用的历史 MapState，无法对齐对象位置';stage.appendChild(missing);}
+    else {
+      const world=document.createElement('div');world.className='replay-world';world.style.width=mapWidth+'px';world.style.height=mapHeight+'px';
+      const image=document.createElement('img');const imageName=String(mapRow.image_file||mapState.imageFile||'image2.png').split(/[\\/]/).pop();image.src='/assets/'+encodeURIComponent(imageName);image.alt='历史矿山底图';image.width=mapWidth;image.height=mapHeight;world.appendChild(image);
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');attrs(svg,{class:'replay-road-layer',width:mapWidth,height:mapHeight,viewBox:'0 0 '+mapWidth+' '+mapHeight});
+      const nodes=new Map((mapState.nodes||[]).map(node=>[node.nodeId,node]));
+      (mapState.segments||[]).forEach(segment=>{const from=nodes.get(segment.fromNodeId),to=nodes.get(segment.toNodeId);if(!from||!to)return;const line=document.createElementNS('http://www.w3.org/2000/svg','line');attrs(line,{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:'road'+(segment.closed?' closed':'')});svg.appendChild(line);});
+      (mapState.nodes||[]).forEach(node=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');attrs(circle,{cx:node.x,cy:node.y,r:3,class:'road-node'});svg.appendChild(circle);if(/Crusher|Shovel|dump/i.test(node.nodeId)){const label=document.createElementNS('http://www.w3.org/2000/svg','text');attrs(label,{x:node.x+6,y:node.y-6,class:'node-label'});label.textContent=node.nodeId;svg.appendChild(label);}});
+      world.appendChild(svg);
+      const points=document.createElement('div');points.className='replay-points';
+      samples.filter(item=>finite(Number(item.x))&&finite(Number(item.y))).forEach(item=>{const isVehicle=item.vehicle_id!=null,node=document.createElement('div');node.className='replay-point'+(isVehicle?'':' shovel');node.style.left=Number(item.x)+'px';node.style.top=Number(item.y)+'px';node.textContent=isVehicle?'T'+item.vehicle_id:'S'+item.shovel_id;node.title='接收 '+formatWall(item.received_at_ms);points.appendChild(node);});
+      world.appendChild(points);stage.appendChild(world);requestAnimationFrame(()=>fitReplayWorld(world,mapWidth,mapHeight));
+    }
     const detail=$('replay-detail');detail.className='replay-detail';detail.innerHTML=samples.map(x=>'<div class="replay-sample"><b>'+(x.vehicle_id!=null?'车辆 T'+x.vehicle_id:esc(x.shovel_name||'铲装点 '+x.shovel_id))+'</b><span>simTime '+num(x.sim_time_seconds,1)+' s · 接收 '+formatWall(x.received_at_ms)+' · 样本年龄 '+durationMs(replay.atWallTimeMs-x.received_at_ms)+'</span><span>'+(x.vehicle_id!=null?'坐标 '+num(x.x,1)+', '+num(x.y,1)+' · '+num(x.speed_mps,1)+' m/s · '+esc(x.statechart_state):'坐标 '+num(x.x,1)+', '+num(x.y,1)+' · 等待 '+x.waiting_trucks+' · 服务 '+x.trucks_in_service)+'</span></div>').join('')||'<div class="detail-empty">该时刻没有已持久化状态样本</div>';
     setQuality($('replay-quality'),samples.length?'partial':'insufficient',samples.length?'RECORDED':'INSUFFICIENT');
   }
+
+  function fitReplayWorld(world,width,height){const stage=$('replay-stage'),scale=Math.min(stage.clientWidth/width,stage.clientHeight/height);if(!finite(scale)||scale<=0)return;world.style.transform='translate('+Math.max(0,(stage.clientWidth-width*scale)/2)+'px,'+Math.max(0,(stage.clientHeight-height*scale)/2)+'px) scale('+scale+')';}
 
   function connectWebSocket() {
     closeSocket();const protocol=location.protocol==='https:'?'wss':'ws';
     const socket=new WebSocket(protocol+'://'+location.host+'/ws/state?simulationId='+enc(model.simulationId));model.socket=socket;
     socket.onopen=()=>{model.reconnectDelay=1000;};
-    socket.onmessage=event=>{let message;try{message=JSON.parse(event.data);}catch(_){return;}if(message.simulationId!==model.simulationId||!isActive())return;
-      if(message.type==='snapshot')model.snapshot=message.data;
+    socket.onmessage=event=>{let message;try{message=JSON.parse(event.data);}catch(_){return;}if(message.simulationId!==model.simulationId||!isActive())return;model.lastSocketMessageAt=Date.now();
+      if(message.type==='snapshot')model.snapshot=projectSnapshotForRun(message.data,model.run);
       if(message.type==='map'&&model.snapshot)model.snapshot.map=message.data;
       if(message.type==='vehicle'&&model.snapshot)upsert(model.snapshot.vehicles,'vehicleId',message.data);
       if(message.type==='shovel'&&model.snapshot)upsert(model.snapshot.shovels,'shovelId',message.data);
       if(message.type==='manualDispatch'){upsert(model.commands,'commandId',message.data);}
-      if(message.type==='decisionTrace'){upsert(model.decisions,'decisionId',message.data);}
+      if(message.type==='decisionTrace'){upsert(model.decisions,'decisionId',message.data);if(model.decisions.length>500)model.decisions=model.decisions.sort((a,b)=>b.createdAtMs-a.createdAtMs).slice(0,500);}
       if(message.type==='simulationRestart'&&model.snapshot){model.snapshot.vehicles=[];model.snapshot.shovels=[];}
       if(message.type==='status')applyStatus(message.data);
-      renderAll();
+      scheduleRender();
     };
     socket.onclose=()=>{if(model.socket!==socket)return;model.socket=null;setTimeout(()=>{if(!model.socket&&model.simulationId)connectWebSocket();},model.reconnectDelay);model.reconnectDelay=Math.min(model.reconnectDelay*2,10000);};
   }
+  let renderTimer=null;
+  function scheduleRender(){if(renderTimer)return;renderTimer=setTimeout(()=>{renderTimer=null;renderAll();},250);}
   function closeSocket(){if(model.socket){const old=model.socket;model.socket=null;old.onclose=null;old.close();}}
   function applyStatus(status){if(!model.snapshot)return;(model.snapshot.vehicles||[]).forEach(x=>{if(status.vehicleStale?.[x.vehicleId]!=null)x.stale=status.vehicleStale[x.vehicleId];});(model.snapshot.shovels||[]).forEach(x=>{if(status.shovelStale?.[x.shovelId]!=null)x.stale=status.shovelStale[x.shovelId];});model.snapshot.online=status.online;}
 
-  function getSelected(){if(!model.selected||!model.snapshot)return null;return model.selected.type==='vehicle'?(model.snapshot.vehicles||[]).find(x=>x.vehicleId===model.selected.id):(model.snapshot.shovels||[]).find(x=>x.shovelId===model.selected.id);}
+  function getSelected(){if(!model.selected||!model.snapshot)return null;return model.selected.type==='vehicle'?(model.snapshot.vehicles||[]).find(x=>Number(x.vehicleId)===Number(model.selected.id)):(model.snapshot.shovels||[]).find(x=>Number(x.shovelId)===Number(model.selected.id));}
   function syncFilters(){$('monitor-filters').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x.dataset.filter===model.monitorFilter));$('decision-filters').querySelectorAll('button').forEach(x=>x.classList.toggle('active',x.dataset.filter===model.decisionFilter));}
   function isActive(){return model.run?.ended_at_ms==null;}
   function showLoading(text){const node=$('page-state');node.className='page-state show loading';node.innerHTML='<span class="spinner"></span><strong>'+esc(text)+'</strong><small>只读取已记录事实</small>';}
@@ -478,6 +622,7 @@ window.dispatchIdentity.then(async identity => {
   function updateUrl(changes){const next=new URLSearchParams(location.search);Object.entries(changes).forEach(([k,v])=>v==null||v===''?next.delete(k):next.set(k,v));history.replaceState(null,'',location.pathname+'?'+next.toString());}
   function attrs(node,map){Object.entries(map).forEach(x=>node.setAttribute(x[0],x[1]));}
   function upsert(list,key,item){const index=list.findIndex(x=>x[key]===item[key]);if(index<0)list.push(item);else list[index]=item;}
+  function mergeRunEvents(current,incoming){const merged=new Map((current||[]).map(item=>[item.event_id,item]));(incoming||[]).forEach(item=>merged.set(item.event_id,item));return [...merged.values()].sort((a,b)=>a.wall_time_ms-b.wall_time_ms||String(a.event_id).localeCompare(String(b.event_id))).slice(-500);}
   function parse(value){if(value==null)return null;if(typeof value==='object')return value;try{return JSON.parse(value);}catch(_){return value;}}
   function compact(v){const s=typeof v==='string'?v:JSON.stringify(v);return s.length>300?s.slice(0,297)+'…':s;}
   function value(v){return v==null?'--':v;}

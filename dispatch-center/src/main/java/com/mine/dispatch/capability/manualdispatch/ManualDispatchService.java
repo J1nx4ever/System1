@@ -57,7 +57,8 @@ public class ManualDispatchService {
         String phase = vehicle.statechartState();
         boolean travelling = phase.startsWith("PrepareRoute") || phase.startsWith("MoveSegment")
                 || phase.startsWith("ArriveSegmentEnd") || phase.startsWith("CheckDestination")
-                || phase.startsWith("TravelToLoadSite") || phase.startsWith("TravelToDumpSite");
+                || phase.startsWith("TravelToLoadSite") || phase.startsWith("TravelToDumpSite")
+                || vehicle.speedMps()>0.1;
         if (!travelling) {
             throw problem(HttpStatus.CONFLICT, "vehicle_not_travelling", "车辆当前不在行驶路段，不能改派");
         }

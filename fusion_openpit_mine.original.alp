@@ -6154,14 +6154,16 @@ String commandJson = t.productionTaskCommandId == null ? "null"
     : "\"" + manualJsonEscape(t.productionTaskCommandId) + "\"";
 String previousJson = t.productionPreviousCommandId == null ? "null"
     : "\"" + manualJsonEscape(t.productionPreviousCommandId) + "\"";
+String previousCycleJson = t.productionPreviousCycleId == null ? "null"
+    : "\"" + manualJsonEscape(t.productionPreviousCycleId) + "\"";
 String payload = String.format(java.util.Locale.ROOT,
     "{\"schemaVersion\":1,\"eventId\":\"%s\",\"runId\":\"%s\","
     + "\"simulationId\":\"%s\",\"cycleId\":\"%s\",\"vehicleId\":%d,"
     + "\"eventType\":\"%s\",\"siteId\":%d,\"simTimeSeconds\":%.9f,"
-    + "\"sentWallTimeMs\":%d,\"commandId\":%s,\"previousCommandId\":%s,\"payloadTons\":%s,"
+    + "\"sentWallTimeMs\":%d,\"commandId\":%s,\"previousCommandId\":%s,\"previousCycleId\":%s,\"payloadTons\":%s,"
     + "\"payloadGrade\":%s,\"producesOre\":%s,\"productionEligible\":%s}",
     eventId, productionRunId, fieldSimId, t.productionCycleId, t.truckId,
-    type, siteId, time(SECOND), System.currentTimeMillis(), commandJson, previousJson,
+    type, siteId, time(SECOND), System.currentTimeMillis(), commandJson, previousJson, previousCycleJson,
 	tons, grade, ore, eligible);
 String topic = "mine/sim/" + fieldSimId + "/event/production/" + t.truckId;
 productionOutbox.putIfAbsent(eventId, new String[]{topic, payload});
@@ -10456,6 +10458,18 @@ String.format("%02d", getIndex()+1);]]></Code>
 					</Properties>
 				</Variable>
 				<Variable Class="PlainVariable">
+					<Id>1790600000101</Id>
+					<Name><![CDATA[productionPreviousCycleId]]></Name>
+					<X>1720</X><Y>510</Y>
+					<Label><X>10</X><Y>0</Y></Label>
+					<PublicFlag>false</PublicFlag>
+					<PresentationFlag>true</PresentationFlag>
+					<ShowLabel>true</ShowLabel>
+					<Properties SaveInSnapshot="true" Constant="false" AccessType="public" StaticVariable="false">
+						<Type><![CDATA[String]]></Type>        
+					</Properties>
+				</Variable>
+				<Variable Class="PlainVariable">
 					<Id>1790532519421</Id>
 					<Name><![CDATA[productionTaskCommandId]]></Name>
 					<X>1720</X><Y>450</Y>
@@ -10854,6 +10868,8 @@ if (node == null) {
     return;
 }
 moveTo(node);
+if (productionCycleId == null) productionCycleId = java.util.UUID.randomUUID().toString();
+main.emitProductionEvent(this, "HAUL_EMPTY_START", targetLoadSiteId);
 debugLastAction = "ArriveLoad_" + targetNodeName;]]></EntryAction>
 						<FillColor/>
 					</Properties>
@@ -10962,6 +10978,7 @@ if (node == null) {
 }
 
 moveTo(node);
+main.emitProductionEvent(this, "HAUL_FULL_START", targetDumpSiteId);
 debugLastAction = "ArriveLoad_" + targetNodeName;]]></EntryAction>
 						<FillColor/>
 					</Properties>
@@ -12625,6 +12642,7 @@ isLoaded = false;
 
 if (productionCycleId != null) {
     main.emitProductionEvent(this, "DUMP_FINISH", ds.siteId);
+    productionPreviousCycleId = productionCycleId;
     productionCycleId = null;
 }
 
