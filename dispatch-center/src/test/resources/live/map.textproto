@@ -1,0 +1,16 @@
+simulation_id: "SIM_001"
+sequence: 1
+sim_time_seconds: 0.5
+image_file: "image2.png"
+image_width_px: 1920
+image_height_px: 957
+nodes { node_id: "Crusher" x: 450 y: 360 }
+nodes { node_id: "dumpNode" x: 1110 y: 690 }
+nodes { node_id: "intersection2" x: 1040 y: 570 }
+nodes { node_id: "ShovelOreHigh1" x: 1125 y: 430 }
+nodes { node_id: "ShovelOreLow1" x: 800 y: 240 }
+nodes { node_id: "ShovelWaste1" x: 1450 y: 380 }
+nodes { node_id: "ShovelWaste2" x: 1510 y: 665 }
+segments { segment_id: "dumpNode_intersection2" from_node_id: "dumpNode" to_node_id: "intersection2" length_model_units: 140 closed: false }
+segments { segment_id: "intersection2_HG1" from_node_id: "intersection2" to_node_id: "ShovelOreHigh1" length_model_units: 210 closed: false }
+segments { segment_id: "intersection2_Crusher" from_node_id: "intersection2" to_node_id: "Crusher" length_model_units: 650 closed: false }

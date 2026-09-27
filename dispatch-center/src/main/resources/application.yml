@@ -1,0 +1,53 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: openpit-dispatch-center
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
+  jackson:
+    default-property-inclusion: always
+
+dispatch:
+  mqtt:
+    enabled: ${MQTT_ENABLED:true}
+    broker-uri: ${MQTT_BROKER_URI:ssl://localhost:8883}
+    client-id: ${MQTT_CLIENT_ID:}
+    topic: ${MQTT_TOPIC:mine/sim/+/state/#}
+    result-topic: ${MQTT_RESULT_TOPIC:mine/sim/+/result/manual-dispatch/+}
+    inference-trigger-topic: ${MQTT_INFERENCE_TRIGGER_TOPIC:mine/sim/+/trigger/+}
+    decision-result-topic: ${MQTT_DECISION_RESULT_TOPIC:mine/sim/+/result/decision/+}
+    username: ${MQTT_USERNAME:field_uplink}
+    password: ${MQTT_PASSWORD:}
+    ca-file: ${MQTT_CA_FILE:}
+    keep-alive-seconds: ${MQTT_KEEP_ALIVE_SECONDS:30}
+    connection-timeout-seconds: ${MQTT_CONNECTION_TIMEOUT_SECONDS:10}
+    max-inflight: ${MQTT_MAX_INFLIGHT:1000}
+  storage:
+    jdbc-url: ${DATABASE_URL:jdbc:sqlite:./data/dispatch-center.db}
+    writer-queue-capacity: ${DATABASE_WRITER_QUEUE_CAPACITY:50000}
+  staleness:
+    vehicle-millis: ${VEHICLE_STALE_MS:3000}
+    shovel-millis: ${SHOVEL_STALE_MS:3000}
+    simulation-millis: ${SIMULATION_STALE_MS:5000}
+  inference:
+    enabled: ${INFERENCE_ENABLED:true}
+    dispatch-host: ${DISPATCH_INFERENCE_HOST:127.0.0.1}
+    dispatch-port: ${DISPATCH_INFERENCE_PORT:50051}
+    dispatch-timeout-millis: ${DISPATCH_INFERENCE_TIMEOUT_MS:10000}
+    speed-host: ${SPEED_INFERENCE_HOST:127.0.0.1}
+    speed-port: ${SPEED_INFERENCE_PORT:50060}
+    speed-timeout-millis: ${SPEED_INFERENCE_TIMEOUT_MS:150}
+    min-acceleration-mps2: ${MIN_ACCELERATION_MPS2:-5.0}
+    max-acceleration-mps2: ${MAX_ACCELERATION_MPS2:3.0}
+  security:
+    enabled: ${SECURITY_ENABLED:true}
+    session-hours: ${SECURITY_SESSION_HOURS:12}
+    bootstrap-users: ${SECURITY_BOOTSTRAP_USERS:}
+
+logging:
+  level:
+    root: INFO
+    com.mine.dispatch: INFO

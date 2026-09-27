@@ -1,0 +1,10 @@
+(() => {
+  const alerts=document.getElementById('ops-alerts'),audit=document.getElementById('ops-audit');if(!alerts||!audit)return;const sim=new URLSearchParams(location.search).get('simulationId')||'SIM_001';
+  window.dispatchIdentity.then(user=>{if(user.role==='DISPATCHER')load()});
+  async function load(){const [a,u]=await Promise.all([fetch(`/api/v1/simulations/${sim}/alerts?limit=50`,{cache:'no-store'}),fetch(`/api/v1/simulations/${sim}/audit?limit=50`,{cache:'no-store'})]);renderAlerts(a.ok?await a.json():[]);renderAudit(u.ok?await u.json():[])}
+  function renderAlerts(items){alerts.innerHTML=items.map(x=>`<div class="ops-row"><span><b>${esc(x.status)}</b> ${esc(x.objectType)} ${x.objectId} · ${esc(x.message)}</span><span>${buttons(x)}</span></div>`).join('')||'<em>暂无告警</em>';alerts.querySelectorAll('button').forEach(b=>b.onclick=()=>transition(b.dataset.id,b.dataset.action));}
+  function buttons(x){if(x.status==='OPEN')return btn(x,'acknowledge','确认');if(x.status==='ACKNOWLEDGED')return btn(x,'process','处理');if(x.status==='PROCESSING')return btn(x,'close','关闭');return ''}function btn(x,a,t){return `<button data-id="${x.alertId}" data-action="${a}">${t}</button>`}
+  async function transition(id,action){const detail=action==='close'?(prompt('请输入处理结果')||''):'';if(action==='close'&&!detail)return;const r=await fetch(`/api/v1/simulations/${sim}/alerts/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({detail})});if(!r.ok){const b=await r.json().catch(()=>({}));alert(b.message||`HTTP ${r.status}`)}await load()}
+  function renderAudit(items){audit.innerHTML=items.map(x=>`<div class="ops-row"><span><b>${esc(x.result)}</b> ${esc(x.actorUsername)} · ${esc(x.operation)} · ${esc(x.objectType)} ${esc(x.objectId)}</span><time>${new Date(x.occurredAtMs).toLocaleTimeString()}</time></div>`).join('')||'<em>暂无审计记录</em>'}
+  function esc(v){return String(v??'').replace(/[&<>']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;'}[c]))}
+})();

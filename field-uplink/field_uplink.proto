@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package mine.field.v1;
+
+option java_package = "mine.field.v1";
+option java_multiple_files = true;
+option java_outer_classname = "FieldUplinkProto";
+
+message RoadNode {
+  string node_id = 1;
+  double x = 2;
+  double y = 3;
+}
+
+message RoadSegment {
+  string segment_id = 1;
+  string from_node_id = 2;
+  string to_node_id = 3;
+  double length_model_units = 4;
+  bool closed = 5;
+}
+
+message MapState {
+  string simulation_id = 1;
+  uint64 sequence = 2;
+  double sim_time_seconds = 3;
+  string image_file = 4;
+  uint32 image_width_px = 5;
+  uint32 image_height_px = 6;
+  repeated RoadNode nodes = 7;
+  repeated RoadSegment segments = 8;
+}
+
+message VehicleState {
+  string simulation_id = 1;
+  uint64 sequence = 2;
+  double sim_time_seconds = 3;
+  int64 sent_wall_time_ms = 4;
+  int32 vehicle_id = 5;
+  double x = 6;
+  double y = 7;
+  double speed_mps = 8;
+  bool loaded = 9;
+  double payload_tons = 10;
+  string current_node = 11;
+  string destination_node = 12;
+  string current_segment_id = 13;
+  int32 target_load_site_id = 14;
+  int32 target_dump_site_id = 15;
+  string statechart_state = 16;
+}
+
+message ShovelState {
+  string simulation_id = 1;
+  uint64 sequence = 2;
+  double sim_time_seconds = 3;
+  int32 shovel_id = 4;
+  string shovel_name = 5;
+  double x = 6;
+  double y = 7;
+  bool available = 8;
+  bool busy = 9;
+  int32 waiting_trucks = 10;
+  int32 trucks_in_service = 11;
+  double ore_grade = 12;
+  double remaining_tons = 13;
+  bool produces_ore = 14;
+}

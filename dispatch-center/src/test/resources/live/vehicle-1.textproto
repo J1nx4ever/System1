@@ -1,0 +1,16 @@
+simulation_id: "SIM_001"
+sequence: 1562
+sim_time_seconds: 32.5
+sent_wall_time_ms: 1790384237196
+vehicle_id: 0
+x: 1113.1483992925685
+y: 624.96094755458728
+speed_mps: 6.9444444444444446
+loaded: false
+payload_tons: 0
+current_node: "dumpNode"
+destination_node: "ShovelOreHigh1"
+current_segment_id: "dumpNode_intersection2"
+target_load_site_id: 0
+target_dump_site_id: -1
+statechart_state: "MoveSegment"

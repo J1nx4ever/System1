@@ -1,0 +1,24 @@
+[Unit]
+Description=Open-pit Dispatch Center Backend
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dispatch-center
+Group=dispatch-center
+WorkingDirectory=/opt/dispatch-center
+EnvironmentFile=/etc/dispatch-center/dispatch-center.env
+ExecStart=/usr/bin/java -Ddebug=false -jar /opt/dispatch-center/dispatch-center-0.1.0.jar
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=143
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dispatch-center/data
+
+[Install]
+WantedBy=multi-user.target

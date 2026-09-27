@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>露天矿无人运输调度中心 · 证据链</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">M</span><div><h1>无人运输集中调度中心</h1><p>OPERATION EVIDENCE CONSOLE</p></div></div>
+    <div class="run-context">
+      <label><span>Simulation</span><select id="simulation-select" aria-label="选择仿真实例"></select></label>
+      <label class="run-select-wrap"><span>Run / 场景</span><select id="run-select" aria-label="选择运行"></select></label>
+      <div class="context-value"><span>仿真业务时间</span><strong id="sim-time">--</strong></div>
+      <div class="health-badge" id="mqtt-health"><i></i><span>MQTT 未知</span></div>
+      <div class="health-badge" id="field-health"><i></i><span>现场未知</span></div>
+      <div class="user-chip" id="user-chip">--</div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="nav-rail">
+      <nav id="main-nav">
+        <button data-view="overview" class="active"><span class="nav-icon">◫</span><span>运行总览</span><small>当前运行怎么样</small></button>
+        <button data-view="monitor"><span class="nav-icon">⌖</span><span>实时监控</span><small>现在发生什么</small></button>
+        <button data-view="decision"><span class="nav-icon">⇢</span><span>决策证据</span><small>为何调度 / 是否执行</small></button>
+        <button data-view="cycle"><span class="nav-icon">↻</span><span>周期故事</span><small>运输过程是否闭环</small></button>
+        <button data-view="replay"><span class="nav-icon">◷</span><span>历史回放</span><small>指定时刻的事实</small></button>
+      </nav>
+      <div class="evidence-legend"><span>证据等级</span><b><i class="quality complete"></i>完整</b><b><i class="quality partial"></i>部分</b><b><i class="quality insufficient"></i>不足</b></div>
+    </aside>
+
+    <main class="workspace">
+      <div id="page-state" class="page-state loading"><span class="spinner"></span><strong>正在读取运行上下文</strong><small>不会使用演示默认值</small></div>
+
+      <section class="view active" data-view="overview">
+        <div class="page-heading"><div><span class="eyebrow">RUN OVERVIEW</span><h2>运行总览</h2><p>运行身份、数据质量与已核验生产结果</p></div><span id="overview-quality" class="quality-tag unknown">UNKNOWN</span></div>
+        <div id="run-banner" class="run-banner"></div>
+        <div class="kpi-grid">
+          <button class="kpi" data-jump="monitor" data-filter="online"><span>在线车辆</span><strong id="kpi-online">--</strong><small>当前快照 · 非 stale</small></button>
+          <button class="kpi" data-jump="monitor" data-filter="stale"><span>状态失联</span><strong id="kpi-stale">--</strong><small>保留最后位置</small></button>
+          <button class="kpi" data-jump="cycle"><span>作业阶段完整周期</span><strong id="kpi-cycles">--</strong><small>现行八事件口径</small></button>
+          <button class="kpi" data-jump="decision" data-filter="failed"><span>指令异常</span><strong id="kpi-failed">--</strong><small>拒绝 / 发布失败 / 过期</small></button>
+          <button class="kpi" id="alerts-jump"><span>活动告警</span><strong id="kpi-alerts">--</strong><small>未关闭记录</small></button>
+        </div>
+        <div class="overview-grid">
+          <section class="card entity-overview"><header><div><span class="eyebrow">FIELD STATE</span><h3>车辆与铲装点概况</h3></div><small id="snapshot-time">暂无快照</small></header><div id="overview-entities" class="overview-entities empty">等待真实状态证据</div></section>
+          <section class="card event-overview"><header><div><span class="eyebrow">EVIDENCE STREAM</span><h3>最近关键事件</h3></div><small>按已记录时间</small></header><div id="recent-events" class="evidence-feed empty">等待运行事件</div></section>
+          <section class="card production-card"><header><div><span class="eyebrow">VERIFIED OUTPUT</span><h3>生产结果</h3></div><small>仅统计可计产周期</small></header><div id="production-metrics" class="production-metrics empty">等待生产证据</div></section>
+          <section class="card alert-card"><header><div><span class="eyebrow">OPERATIONS</span><h3>活动告警</h3></div><small>真实告警记录</small></header><div id="overview-alerts" class="alert-list empty">暂无证据</div></section>
+        </div>
+      </section>
+
+      <section class="view" data-view="monitor">
+        <div class="page-heading compact"><div><span class="eyebrow">LIVE MONITOR</span><h2>实时监控</h2><p>地图、列表与详情共享同一选中对象</p></div><div id="monitor-filters" class="segmented"><button data-filter="all" class="active">全部</button><button data-filter="online">在线</button><button data-filter="running">运行</button><button data-filter="waiting">等待</button><button data-filter="stale">失联</button></div></div>
+        <div class="monitor-grid">
+          <section class="card object-list-card"><header><h3>现场对象</h3><small id="object-count">--</small></header><div id="object-list" class="object-list empty">等待现场状态</div></section>
+          <section class="card map-card"><header><div><span class="eyebrow">RECORDED MAP STATE</span><h3>矿区实时态势</h3></div><div class="map-actions"><button id="zoom-out">−</button><button id="fit-map">适配</button><button id="zoom-in">＋</button></div></header><div id="map-viewport" class="map-viewport"><div id="empty-map" class="map-empty"><span class="radar"></span><strong>等待现场地图</strong><small>只显示 MapState 与实体坐标</small></div><div id="world" class="world" hidden><img id="mine-image" src="/assets/image2.png" alt="矿区地图"><svg id="road-layer" class="overlay road-layer"></svg><div id="shovel-layer" class="overlay"></div><div id="vehicle-layer" class="overlay"></div></div><div class="map-legend"><span><i class="dot vehicle"></i>空载</span><span><i class="dot loaded"></i>载重</span><span><i class="dot shovel"></i>铲装点</span><span><i class="dot stale"></i>失联</span></div></div></section>
+          <aside class="card object-detail"><header><h3 id="detail-title">对象详情</h3><button id="close-detail" title="关闭">×</button></header><div id="detail-empty" class="detail-empty">从地图或列表选择车辆 / 铲装点</div><div id="detail-body" hidden><div id="detail-status" class="detail-status"></div><dl id="detail-fields"></dl><div class="detail-actions"><button id="detail-decision">查看决策证据</button><button id="detail-cycle">查看所属 Cycle</button></div><div class="manual-dispatch"><h4>人工改派</h4><p id="dispatch-context">由服务端校验在线、行驶态、载荷、目标与路线。</p><label>改派目标<select id="dispatch-target"></select></label><button id="dispatch-submit">确认改派</button><small id="dispatch-status">选择行驶中的车辆</small><div id="dispatch-history" class="dispatch-history"></div></div></div></aside>
+        </div>
+      </section>
+
+      <section class="view" data-view="decision">
+        <div class="page-heading compact"><div><span class="eyebrow">DECISION EVIDENCE</span><h2>决策证据</h2><p>触发 → 输入 → 输出 → 校验 → Command → Ack</p></div><div id="decision-filters" class="segmented"><button data-filter="all" class="active">全部</button><button data-filter="TASK">DISPATCH</button><button data-filter="SPEED">CONTROL</button><button data-filter="failed">异常</button></div></div>
+        <div class="split-grid"><section class="card master-list"><header><h3>决策记录</h3><small id="decision-count">--</small></header><div id="decision-list" class="decision-list empty">等待真实决策</div></section><section class="card evidence-detail"><header><h3>证据链详情</h3><span id="decision-quality" class="quality-tag unknown">UNKNOWN</span></header><div id="decision-detail" class="detail-empty">选择一条决策查看原始证据</div></section></div>
+      </section>
+
+      <section class="view" data-view="cycle">
+        <div class="page-heading compact"><div><span class="eyebrow">CYCLE STORY</span><h2>周期故事</h2><p>只按源端 cycleId 关联，不按时间邻近拼接</p></div><span class="scope-note">当前可证明：到铲至卸载完成的作业阶段</span></div>
+        <div class="split-grid cycle-grid"><section class="card master-list"><header><h3>Cycle 列表</h3><small id="cycle-count">--</small></header><div id="cycle-list" class="cycle-list empty">等待生产事件</div></section><section class="card cycle-detail-card"><header><h3>Cycle 时间线</h3><span id="cycle-quality" class="quality-tag unknown">UNKNOWN</span></header><div id="cycle-detail" class="detail-empty">选择 Cycle 查看事件完整性</div></section></div>
+      </section>
+
+      <section class="view" data-view="replay">
+        <div class="page-heading compact"><div><span class="eyebrow">READ-ONLY REPLAY</span><h2>历史回放</h2><p>按接收墙钟查询，主视图同时展示样本仿真时间</p></div><span class="readonly-badge">只读 · 不触发指令</span></div>
+        <section class="card replay-toolbar"><label>墙钟查询时间 <input id="replay-time" type="datetime-local" step="1"></label><button id="replay-load">读取已记录状态</button><div><span>查询墙钟</span><strong id="replay-wall">--</strong></div><div><span>样本仿真时间</span><strong id="replay-sim">--</strong></div><div><span>插值</span><strong>否</strong></div></section>
+        <div class="replay-grid"><section class="card replay-map-card"><header><h3>历史对象状态</h3><small>Recorded samples only</small></header><div id="replay-stage" class="replay-stage"><div class="detail-empty">选择运行内的墙钟时刻开始回放</div></div></section><section class="card replay-evidence"><header><h3>同时刻证据</h3><span id="replay-quality" class="quality-tag unknown">UNKNOWN</span></header><div id="replay-detail" class="replay-detail empty">尚未查询</div></section></div>
+      </section>
+    </main>
+  </div>
+
+  <footer><span>证据来源：AnyLogic → MQTT → Dispatch Center → 持久化记录</span><span id="footer-status">尚未读取</span></footer>
+  <script src="/session.js"></script><script src="/app.js" defer></script>
+</body>
+</html>

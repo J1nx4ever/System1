@@ -1,0 +1,14 @@
+simulation_id: "SIM_001"
+sequence: 1566
+sim_time_seconds: 32.5
+shovel_id: 3
+shovel_name: "W2"
+x: 1510
+y: 665
+available: true
+busy: true
+waiting_trucks: 2
+trucks_in_service: 1
+ore_grade: 0
+remaining_tons: 95000
+produces_ore: false

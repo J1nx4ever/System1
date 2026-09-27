@@ -1,0 +1,36 @@
+# Copy values into environment variables; do not commit real passwords.
+server:
+  port: 8080
+
+dispatch:
+  mqtt:
+    enabled: true
+    broker-uri: ssl://localhost:8883
+    client-id: dispatch-center-local
+    topic: mine/sim/+/state/#
+    result-topic: mine/sim/+/result/manual-dispatch/+
+    inference-trigger-topic: mine/sim/+/trigger/+
+    decision-result-topic: mine/sim/+/result/decision/+
+    username: field_uplink
+    password: ${MQTT_PASSWORD}
+    ca-file: /absolute/path/to/mqtt-tls/certs/ca.crt
+  storage:
+    jdbc-url: jdbc:sqlite:./data/dispatch-center.db
+  staleness:
+    vehicle-millis: 3000
+    shovel-millis: 3000
+    simulation-millis: 5000
+  inference:
+    enabled: true
+    dispatch-host: 127.0.0.1
+    dispatch-port: 50051
+    dispatch-timeout-millis: 10000
+    speed-host: 127.0.0.1
+    speed-port: 50060
+    speed-timeout-millis: 150
+    min-acceleration-mps2: -5.0
+    max-acceleration-mps2: 3.0
+  security:
+    enabled: true
+    session-hours: 12
+    bootstrap-users: ${SECURITY_BOOTSTRAP_USERS}
