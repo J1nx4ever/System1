@@ -22,6 +22,9 @@ dispatch:
     simulation-millis: 5000
   inference:
     enabled: true
+    mode: onnx
+    dispatch-model-path: ./models/dispatch_ppo.onnx
+    speed-model-path: ./models/speed_actor.onnx
     dispatch-host: 127.0.0.1
     dispatch-port: 50051
     dispatch-timeout-millis: 10000

@@ -10,6 +10,11 @@
 `ANYLOGIC_INFERENCE_GATEWAY.md` 手工接入推理触发、指令执行和回执；只读 `.alp`
 不会由后台工程修改。
 
+调度中心与车/铲端的双向文字消息走 MQTT，见
+[`TERMINAL_MQTT_CONVERSATION.md`](TERMINAL_MQTT_CONVERSATION.md)。
+AnyLogic 端请按 [`ANYLOGIC_TERMINAL_MQTT_MANUAL.md`](ANYLOGIC_TERMINAL_MQTT_MANUAL.md)
+在当前工程中手工修改；`fusion_openpit_mine.original.alp` 仅作只读参考。
+
 ## 已核对的真实发布契约
 
 来源为工作区 `fusion_openpit_mine.original.alp` 和
@@ -36,6 +41,15 @@
 上传的两个协议 JAR 已原样放入项目本地 Maven 仓库。派单响应仅含
 `action/value/logits/latency`，速度响应仅含各车 `acceleration`，均无解释字段。
 页面只展示真实输入、模型原始输出、可核验的后台校验和回执。
+
+调度中心的“决策证据”分为“任务指派”和“速度控制”，分别读取各类型最近
+500 条记录；点击左侧记录查看右侧完整证据链。任务指派逐条记录。速度控制
+仍逐周期推理并发送 MQTT 指令，但证据按车辆自适应采样：首条、每 10 秒
+保底一条、前车/冲突风险出现时立即一条，以及相隔至少 2 秒的风险变化或
+加速度变化达到 0.5 m/s² 时记录。未采样命令的候选证据在内存中最多
+保留 60 秒、最多 10000 条；期间若发布失败或现场回执为 REJECTED/EXPIRED，
+会补录为完整决策证据。正常 EXECUTED 的未采样命令不落库。既有历史记录
+不删除，采样仅对重启后新接收的速度推理生效。
 
 ## 构建与测试
 
@@ -78,6 +92,27 @@ export MQTT_CA_FILE=/home/jinx/桌面/System1/mqtt-tls/certs/ca.crt
 
 打开：<http://localhost:8080/>
 
+## 进程内 ONNX 推理
+
+后台默认使用 Java ONNX Runtime 直接加载 `models/dispatch_ppo.onnx` 和
+`models/speed_actor.onnx`，不再要求启动 50051/50060 两个 Python 推理进程。
+派单模型输出 4 个 logits 和 value，由 Java 取 argmax；速度模型对一帧全部车辆
+批量运行 actor，并在模型内完成 `[-1,1]` 到 `[-3,2] m/s²` 的分段映射。
+
+重新导出和执行 Python/ONNX 数值校验：
+
+```bash
+cd /home/jinx/System1/DispatchPPO
+conda run -n anylogic-env python -m python.export_onnx --model dispatch_ppo.zip --output ../dispatch-center/models/dispatch_ppo.onnx
+
+cd /home/jinx/System1/speedcontrol
+conda run -n anylogic-env python export_onnx.py --checkpoint checkpoint_000016/policies/default_policy --output ../dispatch-center/models/speed_actor.onnx
+```
+
+生产部署时，JAR 和 `models/` 目录需一起复制。可用
+`DISPATCH_ONNX_MODEL`、`SPEED_ONNX_MODEL` 指定绝对路径。灰度回退到旧 Python gRPC
+服务时设置 `INFERENCE_MODE=grpc`；默认值为 `onnx`。
+
 ## REST 与 WebSocket
 
 - `GET /api/v1/health`
@@ -94,6 +129,8 @@ export MQTT_CA_FILE=/home/jinx/桌面/System1/mqtt-tls/certs/ca.crt
 - `WS /ws/state?simulationId=SIM_001`
 - `POST /api/v1/auth/login`, `GET /api/v1/auth/me`, `POST /api/v1/auth/logout`
 - `GET/POST /api/v1/simulations/{id}/terminal-actions`
+- `GET/POST /api/v1/simulations/{id}/terminal-messages`
+- `POST /api/v1/simulations/{id}/terminal-messages/{messageId}/reply`
 - `GET /api/v1/simulations/{id}/alerts` and `POST .../alerts/{alertId}/{acknowledge|process|close}`
 - `GET /api/v1/simulations/{id}/audit`
 

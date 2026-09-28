@@ -1,3 +1,5 @@
+const conversationCenterScript=document.createElement('script');
+conversationCenterScript.src='/terminal-conversation-center.js';document.head.appendChild(conversationCenterScript);
 window.dispatchIdentity.then(async identity => {
   if (identity.role !== 'DISPATCHER') {
     location.replace(identity.role === 'VEHICLE' ? '/vehicle.html' : '/shovel.html');
@@ -12,13 +14,15 @@ window.dispatchIdentity.then(async identity => {
     production: null, alerts: [], commands: [], replay: null, errors: new Map(),
     selected: null, selectedDecision: null, selectedCycle: null, cycleStory: null,
     view: params.get('view') || 'overview', monitorFilter: params.get('filter') || 'all',
-    decisionFilter: 'all', socket: null, reconnectDelay: 1000, lastSocketMessageAt: 0, dispatchBusy: false, dispatchFeedback: ''
+    decisionFilter: 'TASK', socket: null, reconnectDelay: 1000, lastSocketMessageAt: 0, dispatchBusy: false, dispatchFeedback: ''
   };
   const cycleDisclosureStates=new Map();
   const eventOrder = ['ARRIVE_SHOVEL','QUEUE_LOAD','LOADING_START','LOADING_FINISH','ARRIVE_DUMP','QUEUE_DUMP','DUMP_START','DUMP_FINISH'];
   const eventLabels = {
     ARRIVE_SHOVEL:'到达铲装点', QUEUE_LOAD:'进入装载队列', LOADING_START:'开始装载', LOADING_FINISH:'完成装载',
-    ARRIVE_DUMP:'到达卸载点', QUEUE_DUMP:'进入卸载队列', DUMP_START:'开始卸载', DUMP_FINISH:'完成卸载'
+    ARRIVE_DUMP:'到达卸载点', QUEUE_DUMP:'进入卸载队列', DUMP_START:'开始卸载', DUMP_FINISH:'完成卸载',
+    TERMINAL_REQUEST:'终端请求', TERMINAL_EXCEPTION:'终端异常上报', TERMINAL_TASK_CONFIRMATION:'任务确认',
+    ALERT_OPENED:'异常告警创建', ALERT_ACKNOWLEDGED:'告警已确认', ALERT_PROCESSING:'告警处理中', ALERT_CLOSED:'告警已关闭'
   };
   const shovelTargets=['ShovelOreHigh1','ShovelOreHigh2','ShovelOreLow','ShovelWaste'];
   let zoom=1, offsetX=0, offsetY=0, geometryKey='',runRefreshTimer=null,snapshotRefreshTimer=null,refreshInFlight=false,snapshotInFlight=false,runRefreshToken=0,snapshotRefreshToken=0,cycleStoryRequest=0;
@@ -33,7 +37,11 @@ window.dispatchIdentity.then(async identity => {
     document.querySelectorAll('[data-jump]').forEach(button => button.onclick=()=>{
       if (button.dataset.filter) {
         if (button.dataset.jump === 'monitor') model.monitorFilter=button.dataset.filter;
-        if (button.dataset.jump === 'decision') model.decisionFilter=button.dataset.filter;
+        if (button.dataset.jump === 'decision') {
+          const failed=model.decisions.filter(x=>['REJECTED','PUBLISH_FAILED','EXPIRED'].includes(x.ackStatus)).sort((a,b)=>b.createdAtMs-a.createdAtMs)[0];
+          model.decisionFilter=button.dataset.filter==='failed'?(failed?.decisionType||'TASK'):button.dataset.filter;
+          if(failed&&button.dataset.filter==='failed')model.selectedDecision=failed.decisionId;
+        }
       }
       setView(button.dataset.jump);
     });
@@ -103,7 +111,7 @@ window.dispatchIdentity.then(async identity => {
       collect('events','/api/v1/runs/'+enc(runId)+'/events?limit=500&latest=true'),
       collect('production','/api/v1/runs/'+enc(runId)+'/production/summary'),
       collect('productionEvents','/api/v1/runs/'+enc(runId)+'/production/events?limit=1000&latest=true'),
-      collect('decisions','/api/v1/simulations/'+enc(model.simulationId)+'/decisions?limit=500'),
+      collectDecisionTypes(),
       collect('alerts','/api/v1/simulations/'+enc(model.simulationId)+'/alerts?limit=100'),
       collect('commands','/api/v1/simulations/'+enc(model.simulationId)+'/manual-dispatch?limit=200')
     ];
@@ -115,6 +123,8 @@ window.dispatchIdentity.then(async identity => {
     model.alerts=(model.alerts||[]).filter(item=>item.createdAtMs>=start&&item.createdAtMs<end);
     model.selected=restoringInitialRun?restoreSelected():null;
     model.selectedDecision=restoringInitialRun?params.get('decisionId'):null;
+    const restoredDecision=model.decisions.find(item=>item.decisionId===model.selectedDecision);
+    if(restoredDecision)model.decisionFilter=restoredDecision.decisionType;
     model.selectedCycle=restoringInitialRun?params.get('cycleId'):null;
     renderAll();
     hidePageState();
@@ -152,14 +162,16 @@ window.dispatchIdentity.then(async identity => {
       if(latestRun){model.run=latestRun;$('run-select').replaceChildren(...runs.map(item=>option(item.run_id,runLabel(item))));$('run-select').value=latestRun.run_id;}
       if(!isActive()){stopRunRefresh();closeSocket();renderAll();return;}
       const lastEvent=model.events.at(-1),afterMs=lastEvent?Math.max(0,Number(lastEvent.wall_time_ms)-5000):0;
-      const [events,productionEvents,production,snapshot]=await Promise.all([
+      const [events,productionEvents,production,snapshot,alerts]=await Promise.all([
         api('/api/v1/runs/'+enc(model.run.run_id)+'/events?limit=500&afterMs='+afterMs+'&afterId='),
         api('/api/v1/runs/'+enc(model.run.run_id)+'/production/events?limit=1000&latest=true'),
         api('/api/v1/runs/'+enc(model.run.run_id)+'/production/summary'),
-        api('/api/v1/simulations/'+enc(model.simulationId)+'/snapshot')
+        api('/api/v1/simulations/'+enc(model.simulationId)+'/snapshot'),
+        api('/api/v1/simulations/'+enc(model.simulationId)+'/alerts?limit=100').then(items=>{model.errors.delete('alerts');return items;}).catch(error=>{model.errors.set('alerts',error.message);return model.alerts;})
       ]);
       if(token!==runRefreshToken)return;
-      model.events=mergeRunEvents(model.events,events);model.productionEvents=productionEvents;model.production=production;model.snapshot=projectSnapshotForRun(snapshot,model.run);model.errors.delete('refresh');model.errors.delete('snapshot');
+      const start=Number(model.run.started_at_ms),end=model.run.ended_at_ms==null?Infinity:Number(model.run.ended_at_ms);
+      model.events=mergeRunEvents(model.events,events);model.productionEvents=productionEvents;model.production=production;model.snapshot=projectSnapshotForRun(snapshot,model.run);model.alerts=alerts.filter(item=>item.createdAtMs>=start&&item.createdAtMs<end);model.errors.delete('refresh');model.errors.delete('snapshot');
       renderAll();if(model.selectedCycle)loadCycleStory(model.selectedCycle);
     }catch(error){model.errors.set('refresh',error.message);renderAll();}
     finally{if(token===runRefreshToken)refreshInFlight=false;}
@@ -193,6 +205,18 @@ window.dispatchIdentity.then(async identity => {
     catch(error) { model.errors.set(key,error.message); model[key]=key==='production'||key==='snapshot'||key==='health'?null:[]; }
   }
 
+  async function collectDecisionTypes() {
+    const base='/api/v1/simulations/'+enc(model.simulationId)+'/decisions?limit=500&type=';
+    const results=await Promise.all(['TASK','SPEED'].map(async type=>{
+      try{return {items:await api(base+type)};}
+      catch(error){return {items:[],error:type+'：'+error.message};}
+    }));
+    model.decisions=results.flatMap(result=>result.items);
+    const errors=results.map(result=>result.error).filter(Boolean);
+    if(errors.length)model.errors.set('decisions',errors.join('；'));
+    else model.errors.delete('decisions');
+  }
+
   function setView(view) {
     if(!['overview','monitor','decision','cycle','replay'].includes(view))view='overview';
     const changed=model.view!==view;
@@ -219,13 +243,14 @@ window.dispatchIdentity.then(async identity => {
   function renderTopbar() {
     const active=isActive(), snapshot=active?model.snapshot:null;
     $('finish-run').hidden=!active;
+    $('scenario-context').textContent=model.run?.scenario_id||'--';
     const simTimes=[
       ...(snapshot?.vehicles||[]).map(x=>x.simTimeSeconds),
       ...(snapshot?.shovels||[]).map(x=>x.simTimeSeconds),
       ...(model.productionEvents||[]).map(x=>x.simTimeSeconds),
       ...(model.events||[]).map(x=>x.sim_time_seconds)
     ].filter(finite);
-    $('sim-time').textContent=simTimes.length?Math.max(...simTimes).toFixed(1)+' s':'未采集';
+    $('sim-time').textContent=simTimes.length?Math.max(...simTimes).toFixed(1)+' s':'--';
     setHealth($('mqtt-health'),model.health?.mqttConnected===true,'MQTT '+(model.health?.mqttConnected===true?'已连接':model.health?'未连接':'未知'));
     if(!active)setHealth($('field-health'),null,'历史 Run');
     else setHealth($('field-health'),snapshot?.online===true,snapshot?.online===true?'现场在线':snapshot?'现场失联':'现场未知');
@@ -296,8 +321,9 @@ window.dispatchIdentity.then(async identity => {
   function renderAlerts(items) {
     const root=$('overview-alerts');
     if(!items.length){root.className='alert-list empty';root.textContent=model.errors.get('alerts')||'当前 Run 没有活动告警';return;}
-    root.className='alert-list';root.innerHTML=items.slice(0,15).map(x=>'<div class="alert-row"><div><b>'+esc(x.severity)+' · '+esc(x.status)+'</b><small>'+esc(x.objectType)+' '+x.objectId+' · '+esc(x.message)+'</small></div>'+alertButton(x)+'</div>').join('');
-    root.querySelectorAll('button').forEach(button=>button.onclick=()=>transitionAlert(button.dataset.id,button.dataset.action));
+    root.className='alert-list';root.innerHTML=items.slice(0,15).map(x=>'<div class="alert-row"><div><b>'+esc(x.severity)+' · '+esc(x.status)+'</b><small>'+esc(x.objectType)+' '+x.objectId+' · '+esc(x.message)+'</small></div><div class="alert-actions">'+alertButton(x)+(['VEHICLE','SHOVEL'].includes(x.objectType)?'<button data-reply-type="'+esc(x.objectType)+'" data-reply-id="'+Number(x.objectId)+'" data-alert-message="'+esc(x.message)+'">回复现场</button>':'')+'</div></div>').join('');
+    root.querySelectorAll('button[data-action]').forEach(button=>button.onclick=()=>transitionAlert(button.dataset.id,button.dataset.action));
+    root.querySelectorAll('button[data-reply-type]').forEach(button=>button.onclick=()=>window.dispatchEvent(new CustomEvent('dispatch-reply-terminal',{detail:{type:button.dataset.replyType,id:button.dataset.replyId,message:button.dataset.alertMessage}})));
   }
 
   function alertButton(x){const next=x.status==='OPEN'?['acknowledge','确认']:x.status==='ACKNOWLEDGED'?['process','处理']:x.status==='PROCESSING'?['close','关闭']:null;return next?'<button data-id="'+esc(x.alertId)+'" data-action="'+next[0]+'">'+next[1]+'</button>':'';}
@@ -398,15 +424,14 @@ window.dispatchIdentity.then(async identity => {
     renderManualDispatch(vehicle);renderDecisions();
   }
 
-  function openSelectedDecisions(){const item=getSelected();if(!item)return;model.decisionFilter='all';const list=model.decisions.filter(x=>model.selected.type==='vehicle'?x.vehicleId===item.vehicleId:x.shovelId===item.shovelId);if(list.length)model.selectedDecision=list.sort((a,b)=>b.createdAtMs-a.createdAtMs)[0].decisionId;setView('decision');}
+  function openSelectedDecisions(){const item=getSelected();if(!item)return;const list=model.decisions.filter(x=>model.selected.type==='vehicle'?x.vehicleId===item.vehicleId:x.shovelId===item.shovelId);const latest=list.sort((a,b)=>b.createdAtMs-a.createdAtMs)[0];if(latest){model.selectedDecision=latest.decisionId;model.decisionFilter=latest.decisionType;}setView('decision');}
   function openSelectedCycle(){const item=getSelected();if(!item||model.selected.type!=='vehicle')return;const cycles=findCyclesForVehicle(item.vehicleId);if(cycles.length){model.selectedCycle=cycles[0].cycleId;setView('cycle');loadCycleStory(model.selectedCycle);}}
 
   function renderGeometry(map) {
     if(!map){clearMap();return;}const key=map.sequence+':'+map.imageWidthPx+':'+map.imageHeightPx;if(key===geometryKey)return;geometryKey=key;
     $('world').hidden=false;$('empty-map').hidden=true;$('world').style.width=map.imageWidthPx+'px';$('world').style.height=map.imageHeightPx+'px';
     $('mine-image').width=map.imageWidthPx;$('mine-image').height=map.imageHeightPx;
-    const nodes=new Map((map.nodes||[]).map(x=>[x.nodeId,x])),svg=$('road-layer');svg.setAttribute('width',map.imageWidthPx);svg.setAttribute('height',map.imageHeightPx);svg.setAttribute('viewBox','0 0 '+map.imageWidthPx+' '+map.imageHeightPx);svg.replaceChildren();
-    (map.segments||[]).forEach(segment=>{const from=nodes.get(segment.fromNodeId),to=nodes.get(segment.toNodeId);if(!from||!to)return;const line=document.createElementNS('http://www.w3.org/2000/svg','line');attrs(line,{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:'road'+(segment.closed?' closed':'')});svg.appendChild(line);});
+    const svg=$('road-layer');svg.setAttribute('width',map.imageWidthPx);svg.setAttribute('height',map.imageHeightPx);svg.setAttribute('viewBox','0 0 '+map.imageWidthPx+' '+map.imageHeightPx);svg.replaceChildren();
     (map.nodes||[]).forEach(node=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');attrs(circle,{cx:node.x,cy:node.y,r:3,class:'road-node'});svg.appendChild(circle);if(/Crusher|Shovel|dump/i.test(node.nodeId)){const label=document.createElementNS('http://www.w3.org/2000/svg','text');attrs(label,{x:node.x+6,y:node.y-6,class:'node-label'});label.textContent=node.nodeId;label.style.pointerEvents='auto';label.style.cursor='pointer';label.addEventListener('click',event=>{event.stopPropagation();selectMapTarget(node.nodeId);});svg.appendChild(label);}});
     requestAnimationFrame(fitMap);
   }
@@ -430,13 +455,11 @@ window.dispatchIdentity.then(async identity => {
   function applyTransform(){$('world').style.transform='translate('+offsetX+'px,'+offsetY+'px) scale('+zoom+')';}
 
   function renderDecisions() {
-    syncFilters();const root=$('decision-list');let items=[...model.decisions].sort((a,b)=>b.createdAtMs-a.createdAtMs);
-    if(model.decisionFilter==='TASK'||model.decisionFilter==='SPEED')items=items.filter(x=>x.decisionType===model.decisionFilter);
-    if(model.decisionFilter==='failed')items=items.filter(x=>['REJECTED','PUBLISH_FAILED','EXPIRED'].includes(x.ackStatus));
-    setText('decision-count',items.length+' 条');
-    if(!items.length){root.className='decision-list empty';root.textContent=model.errors.get('decisions')||'当前筛选没有决策证据';renderDecisionDetail();return;}
-    if(!items.some(x=>x.decisionId===model.selectedDecision))model.selectedDecision=items[0].decisionId;
-    root.className='decision-list';root.innerHTML=items.map(x=>'<button class="decision-row '+(x.decisionId===model.selectedDecision?'selected':'')+'" data-id="'+esc(x.decisionId)+'"><span class="row-top"><b>'+(x.decisionType==='TASK'?'T'+value(x.vehicleId)+' → '+esc(targetFromDecision(x)||'目标未知'):'T'+value(x.vehicleId)+' · 控制参考')+'</b><em>'+(x.decisionType==='TASK'?'DISPATCH':'CONTROL')+'</em></span><span class="row-meta"><span>'+esc(x.triggerEvent||'触发未记录')+' · '+esc(x.decisionSource||'来源未知')+'</span><span class="ack-'+String(x.ackStatus).toLowerCase()+'">'+esc(x.ackStatus||'UNKNOWN')+'</span></span><span class="row-meta"><span>Command '+esc(shortId(x.commandId))+'</span><time>'+formatWall(x.createdAtMs)+'</time></span></button>').join('');
+    syncFilters();const root=$('decision-list');const items=model.decisions.filter(x=>x.decisionType===model.decisionFilter).sort((a,b)=>b.createdAtMs-a.createdAtMs);
+    setText('decision-count',items.length+(items.length===500?' 条（最近）':' 条'));
+    if(!items.length){model.selectedDecision=null;if(model.view==='decision')updateUrl({decisionId:null});root.className='decision-list empty';root.textContent=model.errors.get('decisions')||'当前类型没有决策证据';renderDecisionDetail();return;}
+    if(!items.some(x=>x.decisionId===model.selectedDecision)){model.selectedDecision=items[0].decisionId;if(model.view==='decision')updateUrl({decisionId:model.selectedDecision});}
+    root.className='decision-list';root.innerHTML=items.map(x=>'<button class="decision-row '+(x.decisionId===model.selectedDecision?'selected':'')+'" data-id="'+esc(x.decisionId)+'"><span class="row-top"><b>'+(x.decisionType==='TASK'?'T'+value(x.vehicleId)+' → '+esc(targetFromDecision(x)||'目标未知'):'T'+value(x.vehicleId)+' · 加速度 '+esc(num(parse(x.modelOutputJson)?.accelerationMps2,2))+' m/s²')+'</b><em>'+(x.decisionType==='TASK'?'DISPATCH':'CONTROL')+'</em></span><span class="row-meta"><span>'+esc(x.triggerEvent||'触发未记录')+' · '+esc(x.decisionSource||'来源未知')+'</span><span class="ack-'+String(x.ackStatus).toLowerCase()+'">'+esc(x.ackStatus||'UNKNOWN')+'</span></span><span class="row-meta"><span>Command '+esc(shortId(x.commandId))+'</span><time>'+formatWall(x.createdAtMs)+'</time></span></button>').join('');
     root.querySelectorAll('button').forEach(button=>button.onclick=()=>{model.selectedDecision=button.dataset.id;updateUrl({decisionId:model.selectedDecision});renderDecisions();});
     renderDecisionDetail();
   }
@@ -454,7 +477,7 @@ window.dispatchIdentity.then(async identity => {
       chain(2,'触发事件',item.triggerEvent||'未采集','决策创建 '+formatWall(item.createdAtMs))+
       chain(3,'网关状态与候选状态',gatewaySummary(input),'输入为网关采集证据，不表述为现场同步快照')+
       chain(4,'决策输入快照',inputSummary(input),explanation?'模型解释：'+explanation:'模型未提供因果解释',false,input)+
-      chain(5,'模型 / 操作者输出',outputSummary(output),'原始输出保留在折叠证据中',false,output)+
+      chain(5,'模型输出与推理延迟',outputSummary(output),'模型调用实测耗时：'+formatInferenceLatency(output?.latencyUs)+'；不含 MQTT 往返与端到端排队时间',false,output)+
       chain(6,'后台校验',(item.validationStatus||'UNKNOWN')+' · '+(item.validationDetail||'无详情'),'PASSED 仅代表校验通过，不等于现场执行',item.validationStatus!=='PASSED')+
       chain(7,'Command 发送',item.publishedAtMs?'已发布 · '+formatWall(item.publishedAtMs):'没有发布证据',(item.commandId||'Command 未采集')+' · '+(item.commandTopic||'Topic 未采集'),!item.publishedAtMs)+
       chain(8,'现场 Ack',(item.ackStatus||'PENDING')+' · '+(item.ackDetail||'等待现场结果'),item.ackAtMs?'回执 '+formatWall(item.ackAtMs):'尚无回执',error);
@@ -464,6 +487,7 @@ window.dispatchIdentity.then(async identity => {
   function gatewaySummary(input){const evidence=input?.evidenceSnapshot||input||{};const vehicle=evidence.vehicleStateAtGateway,candidates=evidence.candidateStatesAtGateway;return (vehicle?'车辆状态已采集':'车辆网关状态未采集')+' · '+(Array.isArray(candidates)?candidates.length+' 个候选状态':'候选状态未采集');}
   function inputSummary(input){if(input==null)return'输入证据无法解析';const values=input?.values||input?.evidenceSnapshot?.normalizedObservation;if(Array.isArray(values))return values.length+' 维输入 · '+(values.length===27?'符合当前调度输入维度':'维度与 27 不一致');return compact(input);}
   function outputSummary(output){if(output==null)return'输出证据无法解析';return output.targetNode?'目标 '+output.targetNode:output.action!=null?'动作 '+output.action:compact(output);}
+  function formatInferenceLatency(value){const us=Number(value);return Number.isFinite(us)&&us>=0?(us>=1000?(us/1000).toFixed(2)+' ms':us.toFixed(0)+' μs'):'未记录';}
   function targetFromDecision(x){const output=parse(x.modelOutputJson);return output?.targetNode||output?.destinationNode||'';}
 
   function cycleGroups() {
@@ -570,8 +594,7 @@ window.dispatchIdentity.then(async identity => {
       const world=document.createElement('div');world.className='replay-world';world.style.width=mapWidth+'px';world.style.height=mapHeight+'px';
       const image=document.createElement('img');const imageName=String(mapRow.image_file||mapState.imageFile||'image2.png').split(/[\\/]/).pop();image.src='/assets/'+encodeURIComponent(imageName);image.alt='历史矿山底图';image.width=mapWidth;image.height=mapHeight;world.appendChild(image);
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');attrs(svg,{class:'replay-road-layer',width:mapWidth,height:mapHeight,viewBox:'0 0 '+mapWidth+' '+mapHeight});
-      const nodes=new Map((mapState.nodes||[]).map(node=>[node.nodeId,node]));
-      (mapState.segments||[]).forEach(segment=>{const from=nodes.get(segment.fromNodeId),to=nodes.get(segment.toNodeId);if(!from||!to)return;const line=document.createElementNS('http://www.w3.org/2000/svg','line');attrs(line,{x1:from.x,y1:from.y,x2:to.x,y2:to.y,class:'road'+(segment.closed?' closed':'')});svg.appendChild(line);});
+
       (mapState.nodes||[]).forEach(node=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');attrs(circle,{cx:node.x,cy:node.y,r:3,class:'road-node'});svg.appendChild(circle);if(/Crusher|Shovel|dump/i.test(node.nodeId)){const label=document.createElementNS('http://www.w3.org/2000/svg','text');attrs(label,{x:node.x+6,y:node.y-6,class:'node-label'});label.textContent=node.nodeId;svg.appendChild(label);}});
       world.appendChild(svg);
       const points=document.createElement('div');points.className='replay-points';
@@ -584,6 +607,12 @@ window.dispatchIdentity.then(async identity => {
 
   function fitReplayWorld(world,width,height){const stage=$('replay-stage'),scale=Math.min(stage.clientWidth/width,stage.clientHeight/height);if(!finite(scale)||scale<=0)return;world.style.transform='translate('+Math.max(0,(stage.clientWidth-width*scale)/2)+'px,'+Math.max(0,(stage.clientHeight-height*scale)/2)+'px) scale('+scale+')';}
 
+  async function refreshActiveAlerts(){
+    if(!isActive())return;const runId=model.run.run_id;
+    try{const items=await api('/api/v1/simulations/'+enc(model.simulationId)+'/alerts?limit=100');if(model.run?.run_id!==runId)return;const start=Number(model.run.started_at_ms),end=model.run.ended_at_ms==null?Infinity:Number(model.run.ended_at_ms);model.alerts=items.filter(item=>item.createdAtMs>=start&&item.createdAtMs<end);model.errors.delete('alerts');renderAll();}
+    catch(error){if(model.run?.run_id===runId){model.errors.set('alerts',error.message);renderAll();}}
+  }
+
   function connectWebSocket() {
     closeSocket();const protocol=location.protocol==='https:'?'wss':'ws';
     const socket=new WebSocket(protocol+'://'+location.host+'/ws/state?simulationId='+enc(model.simulationId));model.socket=socket;
@@ -594,7 +623,9 @@ window.dispatchIdentity.then(async identity => {
       if(message.type==='vehicle'&&model.snapshot)upsert(model.snapshot.vehicles,'vehicleId',message.data);
       if(message.type==='shovel'&&model.snapshot)upsert(model.snapshot.shovels,'shovelId',message.data);
       if(message.type==='manualDispatch'){upsert(model.commands,'commandId',message.data);}
-      if(message.type==='decisionTrace'){upsert(model.decisions,'decisionId',message.data);if(model.decisions.length>500)model.decisions=model.decisions.sort((a,b)=>b.createdAtMs-a.createdAtMs).slice(0,500);}
+      if(message.type==='decisionTrace'){upsert(model.decisions,'decisionId',message.data);model.decisions=['TASK','SPEED'].flatMap(type=>model.decisions.filter(x=>x.decisionType===type).sort((a,b)=>b.createdAtMs-a.createdAtMs).slice(0,500));}
+      if(message.type==='alert')refreshActiveAlerts();
+      if(message.type==='terminalAction')refreshActiveRun();
       if(message.type==='simulationRestart'&&model.snapshot){model.snapshot.vehicles=[];model.snapshot.shovels=[];}
       if(message.type==='status')applyStatus(message.data);
       scheduleRender();
@@ -616,7 +647,7 @@ window.dispatchIdentity.then(async identity => {
   function setQuality(node,kind,text){node.className='quality-tag '+kind;node.textContent=text;}
   function bannerFact(label,v){return '<div><span>'+esc(label)+'</span><strong>'+v+'</strong></div>';}
   function option(v,label){const node=document.createElement('option');node.value=v;node.textContent=label;return node;}
-  function runLabel(run){return (run.ended_at_ms==null?'● ':'○ ')+(run.scenario_id||'未声明场景')+' · '+shortId(run.run_id);}
+  function runLabel(run){return (run.ended_at_ms==null?'● ':'○ ')+shortId(run.run_id);}
   function eventName(v){return eventLabels[v]||String(v||'UNKNOWN').replaceAll('_',' ');}
   function setText(id,text){$(id).textContent=text;}
   function updateUrl(changes){const next=new URLSearchParams(location.search);Object.entries(changes).forEach(([k,v])=>v==null||v===''?next.delete(k):next.set(k,v));history.replaceState(null,'',location.pathname+'?'+next.toString());}

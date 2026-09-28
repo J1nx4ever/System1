@@ -47,6 +47,8 @@ public class InferenceDecisionService implements AutoCloseable {
     private final ManagedChannel dispatchChannel;
     private final DispatchServiceGrpc.DispatchServiceBlockingStub dispatchStub;
     private final SpeedInferenceClient speedClient;
+    private final DispatchOnnxPolicy dispatchOnnxPolicy;
+    private final SpeedOnnxPolicy speedOnnxPolicy;
     private final ExecutorService executor = Executors.newFixedThreadPool(2, runnable -> {
         Thread thread = new Thread(runnable, "inference-decision-worker");
         thread.setDaemon(true);
@@ -64,16 +66,33 @@ public class InferenceDecisionService implements AutoCloseable {
         this.traces = traces;
         this.json = json;
         DispatchProperties.Inference config = properties.getInference();
-        if (config.isEnabled()) {
+        if (!config.isEnabled()) {
+            dispatchChannel = null;
+            dispatchStub = null;
+            speedClient = null;
+            dispatchOnnxPolicy = null;
+            speedOnnxPolicy = null;
+        } else if ("onnx".equalsIgnoreCase(config.getMode())) {
+            dispatchOnnxPolicy = new DispatchOnnxPolicy(config.getDispatchModelPath());
+            speedOnnxPolicy = new SpeedOnnxPolicy(config.getSpeedModelPath());
+            dispatchChannel = null;
+            dispatchStub = null;
+            speedClient = null;
+            log.info("Inference mode=onnx dispatchModel={} speedModel={}",
+                    config.getDispatchModelPath(), config.getSpeedModelPath());
+        } else if ("grpc".equalsIgnoreCase(config.getMode())) {
+            dispatchOnnxPolicy = null;
+            speedOnnxPolicy = null;
             dispatchChannel = ManagedChannelBuilder.forAddress(
                     config.getDispatchHost(), config.getDispatchPort()).usePlaintext().build();
             dispatchStub = DispatchServiceGrpc.newBlockingStub(dispatchChannel);
             speedClient = new SpeedInferenceClient(
                     config.getSpeedHost(), config.getSpeedPort(), config.getSpeedTimeoutMillis());
+            log.info("Inference mode=grpc dispatch={}:{} speed={}:{}",
+                    config.getDispatchHost(), config.getDispatchPort(),
+                    config.getSpeedHost(), config.getSpeedPort());
         } else {
-            dispatchChannel = null;
-            dispatchStub = null;
-            speedClient = null;
+            throw new IllegalArgumentException("unsupported inference mode: " + config.getMode());
         }
     }
 
@@ -143,23 +162,39 @@ public class InferenceDecisionService implements AutoCloseable {
         var evidence = com.mine.dispatch.capability.tracking.DispatchEvidence.capture(request, vehicle,
                 states.data(simulationId).shovels(), states.data(simulationId).map(),
                 System.getenv("DISPATCH_MODEL_VERSION"));
-        DispatchResponse response = dispatchStub
-                .withDeadlineAfter(properties.getInference().getDispatchTimeoutMillis(), TimeUnit.MILLISECONDS)
-                .getNextDestination(request);
-        int action = response.getAction();
-        if (!response.getHasAction() && request.getActionRequired()) {
-            throw new IllegalStateException("dispatch model returned no action");
+        int action;
+        double modelValue;
+        List<Double> modelLogits = new ArrayList<>();
+        long modelLatencyUs;
+        if (dispatchOnnxPolicy != null) {
+            DispatchOnnxPolicy.Prediction prediction =
+                    dispatchOnnxPolicy.predict(request.getObs().getValuesList());
+            action = prediction.action();
+            modelValue = prediction.value();
+            for (float logit : prediction.logits()) modelLogits.add((double) logit);
+            modelLatencyUs = prediction.latencyUs();
+        } else {
+            DispatchResponse response = dispatchStub
+                    .withDeadlineAfter(properties.getInference().getDispatchTimeoutMillis(), TimeUnit.MILLISECONDS)
+                    .getNextDestination(request);
+            action = response.getAction();
+            if (!response.getHasAction() && request.getActionRequired()) {
+                throw new IllegalStateException("dispatch model returned no action");
+            }
+            if (!response.getEpisodeId().isBlank()
+                    && !response.getEpisodeId().equals(request.getEpisodeId())) {
+                throw new IllegalStateException("dispatch episode correlation mismatch");
+            }
+            if (response.getDecisionSequence() != 0
+                    && response.getDecisionSequence() != request.getDecisionSequence()) {
+                throw new IllegalStateException("dispatch sequence correlation mismatch");
+            }
+            modelValue = response.getValue();
+            modelLogits.addAll(response.getLogitsList());
+            modelLatencyUs = response.getLatencyUs();
         }
         if (action < 0 || action >= LOAD_TARGETS.length) {
             throw new IllegalStateException("dispatch action out of range: " + action);
-        }
-        if (!response.getEpisodeId().isBlank()
-                && !response.getEpisodeId().equals(request.getEpisodeId())) {
-            throw new IllegalStateException("dispatch episode correlation mismatch");
-        }
-        if (response.getDecisionSequence() != 0
-                && response.getDecisionSequence() != request.getDecisionSequence()) {
-            throw new IllegalStateException("dispatch sequence correlation mismatch");
         }
         String targetNode = LOAD_TARGETS[action];
         LatestStateStore.SimulationData data = states.data(simulationId);
@@ -187,9 +222,9 @@ public class InferenceDecisionService implements AutoCloseable {
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("action", action);
         output.put("targetNode", targetNode);
-        output.put("value", response.getValue());
-        output.put("logits", response.getLogitsList());
-        output.put("latencyUs", response.getLatencyUs());
+        output.put("value", modelValue);
+        output.put("logits", modelLogits);
+        output.put("latencyUs", modelLatencyUs);
         traces.create(simulationId, "TASK", "DRL_DISPATCH", vehicle.vehicleId(), action,
                 "UNLOAD_COMPLETE", input, output, null,
                 "27维观测有限值；action范围0..3；目标存在于地图；铲装点可用",
@@ -202,7 +237,7 @@ public class InferenceDecisionService implements AutoCloseable {
         command.put("action", action);
         command.put("targetNode", targetNode);
         command.put("issuedAtMs", System.currentTimeMillis());
-        publish(commandTopic, commandId, command);
+        publish(commandTopic, commandId, command, true);
     }
 
     private void handleSpeed(String simulationId, byte[] payload) throws Exception {
@@ -219,7 +254,11 @@ public class InferenceDecisionService implements AutoCloseable {
                 throw new IllegalArgumentException("duplicate speed observation agent");
             }
         }
-        ActionDict actions = speedClient.getAccelerations(observations);
+        long inferenceStartedAtNs = System.nanoTime();
+        ActionDict actions = speedOnnxPolicy != null
+            ? speedOnnxPolicy.predict(observations)
+            : speedClient.getAccelerations(observations);
+        long inferenceLatencyUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - inferenceStartedAtNs);
         for (Action action : actions.getActionsList()) {
             Observation observation = byAgent.get(action.getAgentId());
             if (observation == null) throw new IllegalStateException("action has no matching observation");
@@ -238,11 +277,9 @@ public class InferenceDecisionService implements AutoCloseable {
             String commandTopic = "mine/sim/" + simulationId + "/command/speed/" + commandId;
             Map<String, Object> input = speedInput(observation);
             Map<String, Object> output = Map.of("agentId", action.getAgentId(),
-                    "accelerationMps2", acceleration);
-            traces.create(simulationId, "SPEED", "SPEED_INFERENCE", vehicleId, null,
-                    "CONTROL_CYCLE_500MS", input, output, null,
-                    "agent与观测匹配；单一有限加速度；满足配置安全边界",
-                    commandId, commandTopic);
+                    "accelerationMps2", acceleration, "latencyUs", inferenceLatencyUs);
+            boolean recorded = traces.recordSpeed(simulationId, vehicleId, state.getHasFront(),
+                    state.getHasConflict(), acceleration, input, output, commandId, commandTopic);
             Map<String, Object> command = new LinkedHashMap<>();
             command.put("commandId", commandId);
             command.put("simulationId", simulationId);
@@ -252,14 +289,14 @@ public class InferenceDecisionService implements AutoCloseable {
             command.put("sourceSequence", vehicle.sequence());
             command.put("validForMs", 1000);
             command.put("issuedAtMs", System.currentTimeMillis());
-            publish(commandTopic, commandId, command);
+            publish(commandTopic, commandId, command, recorded);
         }
     }
 
-    private void publish(String topic, String commandId, Object command) throws Exception {
+    private void publish(String topic, String commandId, Object command, boolean recorded) throws Exception {
         try {
             mqtt.publish(topic, json.writeValueAsBytes(command), 1, false);
-            traces.published(commandId);
+            if (recorded) traces.published(commandId);
         } catch (Exception exception) {
             traces.publishFailed(commandId, exception.getMessage());
             throw exception;
@@ -276,6 +313,9 @@ public class InferenceDecisionService implements AutoCloseable {
         }
         for (float value : request.getObs().getValuesList()) {
             if (!Float.isFinite(value)) throw new IllegalArgumentException("dispatch observation is non-finite");
+            if (value < -1.000001f || value > 1.000001f) {
+                throw new IllegalArgumentException("dispatch observation outside [-1,1]");
+            }
         }
         if (request.getTruckId() < 0) throw new IllegalArgumentException("invalid truck id");
     }
@@ -321,6 +361,8 @@ public class InferenceDecisionService implements AutoCloseable {
     public void close() {
         executor.shutdownNow();
         if (speedClient != null) speedClient.close();
+        if (speedOnnxPolicy != null) speedOnnxPolicy.close();
+        if (dispatchOnnxPolicy != null) dispatchOnnxPolicy.close();
         if (dispatchChannel != null) dispatchChannel.shutdownNow();
     }
 

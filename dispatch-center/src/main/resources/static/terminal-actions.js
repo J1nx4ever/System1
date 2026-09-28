@@ -1,3 +1,5 @@
+const conversationTerminalScript=document.createElement('script');
+conversationTerminalScript.src='/terminal-conversation-terminal.js';document.head.appendChild(conversationTerminalScript);
 (() => {
   const el=id=>document.getElementById(id); if(!el('terminal-message'))return;
   let simulationId='SIM_001';

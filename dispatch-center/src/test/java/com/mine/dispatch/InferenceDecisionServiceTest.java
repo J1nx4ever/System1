@@ -47,6 +47,7 @@ class InferenceDecisionServiceTest {
                 }).build().start();
         try {
             DispatchProperties properties = new DispatchProperties();
+            properties.getInference().setMode("grpc");
             properties.getInference().setDispatchPort(dispatchServer.getPort());
             properties.getInference().setSpeedPort(speedServer.getPort());
             properties.getInference().setDispatchTimeoutMillis(2000);
@@ -54,6 +55,8 @@ class InferenceDecisionServiceTest {
             LatestStateStore states = liveState();
             MqttIngestionClient mqtt = mock(MqttIngestionClient.class);
             DecisionTraceService traces = mock(DecisionTraceService.class);
+            when(traces.recordSpeed(anyString(), anyInt(), anyBoolean(), anyBoolean(), anyDouble(),
+                    any(), any(), anyString(), anyString())).thenReturn(true);
             CountDownLatch published = new CountDownLatch(2);
             AtomicReference<String> taskPayload = new AtomicReference<>();
             AtomicReference<String> speedPayload = new AtomicReference<>();
@@ -88,9 +91,11 @@ class InferenceDecisionServiceTest {
                         .contains("\"targetNode\":\"ShovelOreHigh2\"");
                 assertThat(speedPayload.get()).contains("\"vehicleId\":0")
                         .contains("\"accelerationMps2\":0.4");
-                verify(traces, timeout(3000).times(2)).create(anyString(), anyString(), anyString(),
-                        anyInt(), nullable(Integer.class), anyString(), any(), any(), isNull(),
+                verify(traces, timeout(3000)).create(eq("SIM_001"), eq("TASK"), anyString(),
+                        eq(0), anyInt(), anyString(), any(), any(), isNull(),
                         anyString(), anyString(), anyString());
+                verify(traces, timeout(3000)).recordSpeed(eq("SIM_001"), eq(0), anyBoolean(),
+                        anyBoolean(), anyDouble(), any(), any(), anyString(), anyString());
             }
         } finally {
             dispatchServer.shutdownNow();

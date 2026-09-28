@@ -34,6 +34,9 @@ dispatch:
     simulation-millis: ${SIMULATION_STALE_MS:5000}
   inference:
     enabled: ${INFERENCE_ENABLED:true}
+    mode: ${INFERENCE_MODE:onnx}
+    dispatch-model-path: ${DISPATCH_ONNX_MODEL:./models/dispatch_ppo.onnx}
+    speed-model-path: ${SPEED_ONNX_MODEL:./models/speed_actor.onnx}
     dispatch-host: ${DISPATCH_INFERENCE_HOST:127.0.0.1}
     dispatch-port: ${DISPATCH_INFERENCE_PORT:50051}
     dispatch-timeout-millis: ${DISPATCH_INFERENCE_TIMEOUT_MS:10000}

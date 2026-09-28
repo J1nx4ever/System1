@@ -29,6 +29,7 @@ public class RealtimeHub {
         case "manualDispatch"->d instanceof ManualDispatchCommand c&&"VEHICLE".equals(p.role())&&c.vehicleId()==p.subjectId()?e:null;
         case "terminalAction"->d instanceof TerminalAction a&&a.objectType().equals(p.role())&&a.objectId()==p.subjectId()?e:null;
         case "alert"->d instanceof OperationalAlert a&&a.objectType().equals(p.role())&&a.objectId()==p.subjectId()?e:null;
+        case "terminalMessage"->d instanceof TerminalMessage m&&m.objectType().equals(p.role())&&m.objectId()==p.subjectId()?e:null;
         case "status"->d instanceof StatusView s?RealtimeEvent.of("status",e.simulationId(),"VEHICLE".equals(p.role())?new StatusView(s.simulationId(),s.serverTimeMs(),s.online(),Map.of(p.subjectId(),s.vehicleStale().getOrDefault(p.subjectId(),true)),Map.of()):new StatusView(s.simulationId(),s.serverTimeMs(),s.online(),Map.of(),Map.of(p.subjectId(),s.shovelStale().getOrDefault(p.subjectId(),true)))):null;
         default->null;};}
     public static String target(int id){return switch(id){case 0->"ShovelOreHigh1";case 1->"ShovelOreHigh2";case 2->"ShovelOreLow";case 3->"ShovelWaste";default->"";};}

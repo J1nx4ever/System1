@@ -8,14 +8,29 @@ import com.mine.dispatch.web.RealtimeHub;
 import org.springframework.stereotype.Service;
 
 import java.sql.SQLException;
+import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
 public class DecisionTraceService {
+    private static final long SPEED_HEARTBEAT_MS = 10_000;
+    private static final long SPEED_CHANGE_GAP_MS = 2_000;
+    private static final double SPEED_ACCELERATION_CHANGE_MPS2 = 0.5;
+    private static final long SPEED_PENDING_TTL_MS = 60_000;
+    private static final int SPEED_PENDING_LIMIT = 10_000;
     private final DecisionTraceRepository repository;
     private final ObjectMapper json;
     private final RealtimeHub realtime;
+    private final Map<String, SpeedSample> speedSamples = new HashMap<>();
+    private final Map<String, SpeedCandidate> pendingSpeed = new HashMap<>();
+    private final ArrayDeque<SpeedCandidate> pendingOrder = new ArrayDeque<>();
+
+    private record SpeedSample(long atMs, double acceleration, int risk) {}
+    private record SpeedCandidate(long atMs, String simulationId, int vehicleId,
+                                  Object input, Object output, String commandId, String commandTopic) {}
 
     public DecisionTraceService(DecisionTraceRepository repository, ObjectMapper json, RealtimeHub realtime) {
         this.repository = repository;
@@ -42,6 +57,36 @@ public class DecisionTraceService {
         }
     }
 
+    /** Keep every control command, but persist a representative evidence trace per vehicle. */
+    public synchronized boolean recordSpeed(String simulationId, int vehicleId, boolean hasFront,
+                                            boolean hasConflict, double acceleration, Object input,
+                                            Object output, String commandId, String commandTopic) {
+        long now = System.currentTimeMillis();
+        prunePendingSpeed(now);
+        String key = simulationId + ":" + vehicleId;
+        int risk = (hasFront ? 1 : 0) | (hasConflict ? 2 : 0);
+        SpeedSample previous = speedSamples.get(key);
+        boolean sample = previous == null || now - previous.atMs >= SPEED_HEARTBEAT_MS
+                || (risk & ~previous.risk) != 0
+                || (now - previous.atMs >= SPEED_CHANGE_GAP_MS
+                    && (risk != previous.risk
+                        || Math.abs(acceleration - previous.acceleration) >= SPEED_ACCELERATION_CHANGE_MPS2));
+        if (sample) {
+            create(simulationId, "SPEED", "SPEED_INFERENCE", vehicleId, null,
+                    "CONTROL_CYCLE_500MS", input, output, null,
+                    "agent与观测匹配；单一有限加速度；满足配置安全边界；自适应证据采样",
+                    commandId, commandTopic);
+            speedSamples.put(key, new SpeedSample(now, acceleration, risk));
+        } else {
+            SpeedCandidate candidate = new SpeedCandidate(now, simulationId, vehicleId,
+                    input, output, commandId, commandTopic);
+            pendingSpeed.put(commandId, candidate);
+            pendingOrder.addLast(candidate);
+            prunePendingSpeed(now);
+        }
+        return sample;
+    }
+
     public DecisionTrace published(String commandId) {
         try {
             DecisionTrace trace = repository.markPublished(commandId, System.currentTimeMillis());
@@ -52,7 +97,8 @@ public class DecisionTraceService {
         }
     }
 
-    public DecisionTrace publishFailed(String commandId, String detail) {
+    public synchronized DecisionTrace publishFailed(String commandId, String detail) {
+        promotePendingSpeed(commandId);
         try {
             DecisionTrace trace = repository.markPublishFailed(commandId, detail, System.currentTimeMillis());
             broadcast(trace);
@@ -62,11 +108,35 @@ public class DecisionTraceService {
         }
     }
 
-    public void acknowledge(String commandId, String status, String detail, long atMs) {
+    public synchronized void acknowledge(String commandId, String status, String detail, long atMs) {
+        if ("EXECUTED".equals(status)) pendingSpeed.remove(commandId);
+        else promotePendingSpeed(commandId);
         try {
             repository.acknowledge(commandId, status, detail, atMs).ifPresent(this::broadcast);
         } catch (SQLException exception) {
             throw new IllegalStateException("decision trace acknowledgement failed", exception);
+        }
+    }
+
+    private void promotePendingSpeed(String commandId) {
+        SpeedCandidate candidate = pendingSpeed.remove(commandId);
+        if (candidate == null) return;
+        create(candidate.simulationId, "SPEED", "SPEED_INFERENCE", candidate.vehicleId, null,
+                "CONTROL_CYCLE_500MS", candidate.input, candidate.output, null,
+                "agent与观测匹配；单一有限加速度；满足配置安全边界；异常回执补录",
+                candidate.commandId, candidate.commandTopic);
+    }
+
+    private void prunePendingSpeed(long now) {
+        while (!pendingOrder.isEmpty()) {
+            SpeedCandidate oldest = pendingOrder.peekFirst();
+            if (pendingSpeed.size() <= SPEED_PENDING_LIMIT
+                    && now - oldest.atMs <= SPEED_PENDING_TTL_MS) break;
+            pendingOrder.removeFirst();
+            pendingSpeed.remove(oldest.commandId, oldest);
+        }
+        while (!pendingOrder.isEmpty() && !pendingSpeed.containsKey(pendingOrder.peekFirst().commandId)) {
+            pendingOrder.removeFirst();
         }
     }
 

@@ -73,6 +73,9 @@ public class DispatchProperties {
 
     public static class Inference {
         private boolean enabled = true;
+        private String mode = "onnx";
+        private String dispatchModelPath = "./models/dispatch_ppo.onnx";
+        private String speedModelPath = "./models/speed_actor.onnx";
         private String dispatchHost = "127.0.0.1";
         private int dispatchPort = 50051;
         private long dispatchTimeoutMillis = 10000;
@@ -84,6 +87,12 @@ public class DispatchProperties {
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getMode() { return mode; }
+        public void setMode(String mode) { this.mode = mode; }
+        public String getDispatchModelPath() { return dispatchModelPath; }
+        public void setDispatchModelPath(String value) { this.dispatchModelPath = value; }
+        public String getSpeedModelPath() { return speedModelPath; }
+        public void setSpeedModelPath(String value) { this.speedModelPath = value; }
         public String getDispatchHost() { return dispatchHost; }
         public void setDispatchHost(String dispatchHost) { this.dispatchHost = dispatchHost; }
         public int getDispatchPort() { return dispatchPort; }

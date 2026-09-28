@@ -1,22 +1,26 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dispatch-ui-root">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>露天矿无人运输调度中心 · 证据链</title>
+  <title>露天矿山无人运输集中调度与协同控制可视化平台</title>
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/ui-polish.css">
 </head>
-<body>
+<body class="dispatch-ui">
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">M</span><div><h1>无人运输集中调度中心</h1><p>OPERATION EVIDENCE CONSOLE</p></div></div>
+    <div class="brand"><span class="brand-mark">M</span><div><h1>露天矿山无人运输集中调度与协同控制可视化平台</h1><p>PRODUCTION DISPATCH &amp; COLLABORATIVE CONTROL</p></div></div>
     <div class="run-context">
       <label><span>Simulation</span><select id="simulation-select" aria-label="选择仿真实例"></select></label>
-      <label class="run-select-wrap"><span>Run / 场景</span><select id="run-select" aria-label="选择运行"></select></label>
-      <div class="context-value"><span>仿真业务时间</span><strong id="sim-time">--</strong></div>
-      <button id="finish-run" class="finish-run" hidden>结束本次运行</button>
-      <div class="health-badge" id="mqtt-health"><i></i><span>MQTT 未知</span></div>
-      <div class="health-badge" id="field-health"><i></i><span>现场未知</span></div>
-      <div class="user-chip" id="user-chip">--</div>
+      <label class="run-select-wrap"><span>Run</span><select id="run-select" aria-label="选择运行"></select></label>
+      <div class="context-value context-scenario"><span>场景</span><strong id="scenario-context">--</strong></div>
+      <div class="context-value context-time"><span>sim_time</span><strong id="sim-time">--</strong></div>
+      <div class="context-statuses" aria-label="系统连接状态">
+        <div class="health-badge" id="mqtt-health"><i></i><span>MQTT 未知</span></div>
+        <div class="health-badge" id="field-health"><i></i><span>现场未知</span></div>
+      </div>
+      <div class="user-chip"><span>当前用户</span><strong id="user-chip">--</strong></div>
+      <button id="finish-run" class="finish-run" hidden>结束运行</button>
     </div>
   </header>
 
@@ -63,7 +67,7 @@
       </section>
 
       <section class="view" data-view="decision">
-        <div class="page-heading compact"><div><span class="eyebrow">DECISION EVIDENCE</span><h2>决策证据</h2><p>触发 → 输入 → 输出 → 校验 → Command → Ack</p></div><div id="decision-filters" class="segmented"><button data-filter="all" class="active">全部</button><button data-filter="TASK">DISPATCH</button><button data-filter="SPEED">CONTROL</button><button data-filter="failed">异常</button></div></div>
+        <div class="page-heading compact"><div><span class="eyebrow">DECISION EVIDENCE</span><h2>决策证据</h2><p>触发 → 输入 → 输出 → 校验 → Command → Ack；速度证据自适应采样</p></div><div id="decision-filters" class="segmented"><button data-filter="TASK" class="active">任务指派</button><button data-filter="SPEED">速度控制</button></div></div>
         <div class="split-grid"><section class="card master-list"><header><h3>决策记录</h3><small id="decision-count">--</small></header><div id="decision-list" class="decision-list empty">等待真实决策</div></section><section class="card evidence-detail"><header><h3>证据链详情</h3><span id="decision-quality" class="quality-tag unknown">UNKNOWN</span></header><div id="decision-detail" class="detail-empty">选择一条决策查看原始证据</div></section></div>
       </section>
 

@@ -10,7 +10,7 @@
 	<Name><![CDATA[fusion_openpit_mine]]></Name>
 	<EngineVersion>6</EngineVersion>
 	<JavaPackageName><![CDATA[fusion]]></JavaPackageName>
-	<ModelTimeUnit><![CDATA[Minute]]></ModelTimeUnit>
+	<ModelTimeUnit><![CDATA[Second]]></ModelTimeUnit>
 	<ActiveObjectClasses>
 		<!--   =========   Active Object Class   ========  -->
 		<ActiveObjectClass>
@@ -159,11 +159,11 @@ try {
 					<OccurrenceDate>1784620800000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -5046,9 +5046,10 @@ for (Fusion.grpc.Action action : actions.getActionsList()) {
 					    new String[] {
 					        "mine/sim/" + fieldSimId + "/command/manual-dispatch/+",
 					        "mine/sim/" + fieldSimId + "/command/auto-dispatch/+",
-					        "mine/sim/" + fieldSimId + "/command/speed/+"
+					        "mine/sim/" + fieldSimId + "/command/speed/+",
+					        "mine/sim/" + fieldSimId + "/terminal/+/+/message"
 					    },
-					    new int[] { 1, 1, 1 }
+					    new int[] { 1, 1, 1, 1 }
 					).waitForCompletion(5000);
 					fieldMapPublished = false;
 					traceln("[DecisionGateway] command subscriptions ready");
@@ -5068,6 +5069,7 @@ for (Fusion.grpc.Action action : actions.getActionsList()) {
             final String json = new String(
                 message.getPayload(), java.nio.charset.StandardCharsets.UTF_8
             );
+            if (topic.contains("/terminal/") && message.isRetained()) return;
 			if (topic.contains("/command/auto-dispatch/")) {
 				// 这里只写线程安全 Map，不访问 Truck 或其他仿真对象。
 			    String requestId = manualJsonString(json, "requestId");
@@ -5245,6 +5247,9 @@ while (handled < 500) {
     try {
 			if (command[0].contains("/command/speed/")) {
 			    handleSpeedCommand(command[0], command[1]);
+			} else if (command[0].contains("/terminal/")
+			        && command[0].endsWith("/message")) {
+			    handleTerminalMessage(command[0], command[1]);
 			} else {
 			    handleManualDispatchCommand(command[0], command[1]);
 			}
@@ -6154,16 +6159,14 @@ String commandJson = t.productionTaskCommandId == null ? "null"
     : "\"" + manualJsonEscape(t.productionTaskCommandId) + "\"";
 String previousJson = t.productionPreviousCommandId == null ? "null"
     : "\"" + manualJsonEscape(t.productionPreviousCommandId) + "\"";
-String previousCycleJson = t.productionPreviousCycleId == null ? "null"
-    : "\"" + manualJsonEscape(t.productionPreviousCycleId) + "\"";
 String payload = String.format(java.util.Locale.ROOT,
     "{\"schemaVersion\":1,\"eventId\":\"%s\",\"runId\":\"%s\","
     + "\"simulationId\":\"%s\",\"cycleId\":\"%s\",\"vehicleId\":%d,"
     + "\"eventType\":\"%s\",\"siteId\":%d,\"simTimeSeconds\":%.9f,"
-    + "\"sentWallTimeMs\":%d,\"commandId\":%s,\"previousCommandId\":%s,\"previousCycleId\":%s,\"payloadTons\":%s,"
+    + "\"sentWallTimeMs\":%d,\"commandId\":%s,\"previousCommandId\":%s,\"payloadTons\":%s,"
     + "\"payloadGrade\":%s,\"producesOre\":%s,\"productionEligible\":%s}",
     eventId, productionRunId, fieldSimId, t.productionCycleId, t.truckId,
-    type, siteId, time(SECOND), System.currentTimeMillis(), commandJson, previousJson, previousCycleJson,
+    type, siteId, time(SECOND), System.currentTimeMillis(), commandJson, previousJson,
 	tons, grade, ore, eligible);
 String topic = "mine/sim/" + fieldSimId + "/event/production/" + t.truckId;
 productionOutbox.putIfAbsent(eventId, new String[]{topic, payload});
@@ -6200,6 +6203,79 @@ for (java.util.Map.Entry<String,String[]> entry : productionOutbox.entrySet()) {
         traceln("[Production] publish pending: " + e.getMessage());
     }
 }]]></Body>
+				</Function>
+				<Function AccessType="default" StaticFunction="false">
+					<ReturnModificator>VOID</ReturnModificator>
+					<ReturnType><![CDATA[double]]></ReturnType>
+					<Id>1790585173140</Id>
+					<Name><![CDATA[handleTerminalMessage]]></Name>
+					<X>1300</X><Y>-1030</Y>
+					<Label><X>10</X><Y>0</Y></Label>
+					<PublicFlag>false</PublicFlag>
+					<PresentationFlag>true</PresentationFlag>
+					<ShowLabel>true</ShowLabel>
+					<Parameter>
+						<Name><![CDATA[topic]]></Name>
+						<Type><![CDATA[String]]></Type>
+					</Parameter>
+					<Parameter>
+						<Name><![CDATA[json]]></Name>
+						<Type><![CDATA[String]]></Type>
+					</Parameter>
+					<Body><![CDATA[String[] parts = topic.split("/");
+if (parts.length != 7 || !"mine".equals(parts[0])
+        || !"sim".equals(parts[1]) || !fieldSimId.equals(parts[2])
+        || !"terminal".equals(parts[3]) || !"message".equals(parts[6])) {
+    throw new IllegalArgumentException("invalid terminal message topic");
+}
+
+String terminalType = parts[4];
+int terminalId = Integer.parseInt(parts[5]);
+String sourceId = manualJsonString(json, "messageId");
+if (!("VEHICLE".equals(terminalType) || "SHOVEL".equals(terminalType))
+        || !sourceId.matches("[A-Za-z0-9_-]{1,60}")
+        || manualJsonInt(json, "schemaVersion") != 1
+        || !fieldSimId.equals(manualJsonString(json, "simulationId"))
+        || !terminalType.equals(manualJsonString(json, "targetType"))
+        || terminalId != manualJsonInt(json, "targetId")) {
+    throw new IllegalArgumentException("terminal topic/payload mismatch");
+}
+
+boolean targetExists = false;
+if ("VEHICLE".equals(terminalType)) {
+    for (Truck t : trucks) {
+        if (t != null && t.truckId == terminalId) targetExists = true;
+    }
+} else {
+    for (LoadSite s : loadSites) {
+        if (s != null && s.siteId == terminalId) targetExists = true;
+    }
+}
+if (!targetExists) throw new IllegalArgumentException("terminal target does not exist");
+if (fieldClient == null || !fieldClient.isConnected()) {
+    throw new IllegalStateException("field MQTT is not connected");
+}
+
+String responseTopic = "mine/sim/" + fieldSimId + "/terminal/"
+        + terminalType + "/" + terminalId + "/response";
+String response = String.format(java.util.Locale.ROOT,
+        "{\"schemaVersion\":1,\"messageId\":\"ack-%s\","
+        + "\"simulationId\":\"%s\",\"terminalType\":\"%s\","
+        + "\"terminalId\":%d,\"senderName\":\"AnyLogic AUTO_ACK\","
+        + "\"text\":\"AnyLogic 已接收调度消息\",\"sentAtMs\":%d,"
+        + "\"replyToMessageId\":\"%s\"}",
+        sourceId, fieldSimId, terminalType, terminalId,
+        System.currentTimeMillis(), sourceId);
+try {
+    fieldClient.publish(responseTopic,
+            response.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            1, false, null, null);
+} catch (org.eclipse.paho.client.mqttv3.MqttException e) {
+    throw new IllegalStateException(
+            "terminal response publish failed: " + e.getMessage(), e);
+}
+traceln("[TerminalMessage] received " + sourceId
+        + " for " + terminalType + terminalId);]]></Body>
 				</Function>
 			</Functions>
 			<AgentLinks>
@@ -8758,11 +8834,11 @@ traceln("当前调度策略已切换为模式：" + currentDispatchPolicy);]]></
 					<OccurrenceDate>1784620800000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -10458,18 +10534,6 @@ String.format("%02d", getIndex()+1);]]></Code>
 					</Properties>
 				</Variable>
 				<Variable Class="PlainVariable">
-					<Id>1790600000101</Id>
-					<Name><![CDATA[productionPreviousCycleId]]></Name>
-					<X>1720</X><Y>510</Y>
-					<Label><X>10</X><Y>0</Y></Label>
-					<PublicFlag>false</PublicFlag>
-					<PresentationFlag>true</PresentationFlag>
-					<ShowLabel>true</ShowLabel>
-					<Properties SaveInSnapshot="true" Constant="false" AccessType="public" StaticVariable="false">
-						<Type><![CDATA[String]]></Type>        
-					</Properties>
-				</Variable>
-				<Variable Class="PlainVariable">
 					<Id>1790532519421</Id>
 					<Name><![CDATA[productionTaskCommandId]]></Name>
 					<X>1720</X><Y>450</Y>
@@ -10497,6 +10561,18 @@ String.format("%02d", getIndex()+1);]]></Code>
 						<InitialValue Class="CodeValue">
 							<Code><![CDATA["null"]]></Code>
 						</InitialValue>
+					</Properties>
+				</Variable>
+				<Variable Class="PlainVariable">
+					<Id>1790546815014</Id>
+					<Name><![CDATA[productionPreviousCycleId]]></Name>
+					<X>1720</X><Y>510</Y>
+					<Label><X>10</X><Y>0</Y></Label>
+					<PublicFlag>false</PublicFlag>
+					<PresentationFlag>true</PresentationFlag>
+					<ShowLabel>true</ShowLabel>
+					<Properties SaveInSnapshot="true" Constant="false" AccessType="public" StaticVariable="false">
+						<Type><![CDATA[String]]></Type>        
 					</Properties>
 				</Variable>
 			</Variables>
@@ -10868,8 +10944,6 @@ if (node == null) {
     return;
 }
 moveTo(node);
-if (productionCycleId == null) productionCycleId = java.util.UUID.randomUUID().toString();
-main.emitProductionEvent(this, "HAUL_EMPTY_START", targetLoadSiteId);
 debugLastAction = "ArriveLoad_" + targetNodeName;]]></EntryAction>
 						<FillColor/>
 					</Properties>
@@ -10978,7 +11052,6 @@ if (node == null) {
 }
 
 moveTo(node);
-main.emitProductionEvent(this, "HAUL_FULL_START", targetDumpSiteId);
 debugLastAction = "ArriveLoad_" + targetNodeName;]]></EntryAction>
 						<FillColor/>
 					</Properties>
@@ -11402,7 +11475,7 @@ targetDump.queue.indexOf(this) < targetDump.getEmptySpotCount()]]></Condition>
 					<Properties Source="1776768701133" Target="1780557168024" Trigger="timeout">
 						<Timeout Class="CodeUnitValue">
 							<Code><![CDATA[delay]]></Code>
-							<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+							<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 						</Timeout>
 						<Condition><![CDATA[true]]></Condition>
 						<Rate Class="CodeUnitValue">
@@ -12642,7 +12715,6 @@ isLoaded = false;
 
 if (productionCycleId != null) {
     main.emitProductionEvent(this, "DUMP_FINISH", ds.siteId);
-    productionPreviousCycleId = productionCycleId;
     productionCycleId = null;
 }
 
@@ -13085,11 +13157,11 @@ try {
 					<OccurrenceDate>1776758400000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -13671,11 +13743,11 @@ try {
 					<OccurrenceDate>1784620800000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -15678,11 +15750,11 @@ totalDumpServiceTime += serviceTime;
 					<OccurrenceDate>1784620800000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -17843,11 +17915,11 @@ totalServiceTime += serviceTime;
 					<OccurrenceDate>1780646400000</OccurrenceDate>
 					<OccurrenceTime Class="CodeUnitValue">
 						<Code><![CDATA[0]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</OccurrenceTime>
 					<RecurrenceCode Class="CodeUnitValue">
 						<Code><![CDATA[1]]></Code>
-						<Unit Class="TimeUnits"><![CDATA[MINUTE]]></Unit>
+						<Unit Class="TimeUnits"><![CDATA[SECOND]]></Unit>
 					</RecurrenceCode>
 			</DatasetsCreationProperties>
 			<ScaleRuler>
@@ -18033,9 +18105,9 @@ statCycleTime.add( timeSpent );]]></Body>
 		<Height>600</Height>
 	</Frame>
 	<Database>
-		<Logging>true</Logging>
+		<Logging>false</Logging>
 		<AutoExport>false</AutoExport>
-		<ShutdownCompact>true</ShutdownCompact>
+		<ShutdownCompact>false</ShutdownCompact>
 		<ImportSettings>
 		</ImportSettings>
 		<ExportSettings>
@@ -18120,7 +18192,7 @@ statCycleTime.add( timeSpent );]]></Body>
 				<Parameter>
 					<ParameterName><![CDATA[productionRunId]]></ParameterName>
 					<ParameterValue Class="CodeValue">
-						<Code><![CDATA["fb4dbb77-c530-4b8a-8b4b-dd8ce7096301"]]></Code>
+						<Code><![CDATA["62cec352-6d29-48df-b348-c1411cf8b84b"]]></Code>
 					</ParameterValue>
 				</Parameter>
 			</Parameters>			
@@ -18197,7 +18269,7 @@ statCycleTime.add( timeSpent );]]></Body>
 				<StopOption><![CDATA[Stop at specified time]]></StopOption>
 				<InitialDate><![CDATA[1776729600000]]></InitialDate>	
 				<InitialTime><![CDATA[0.0]]></InitialTime>	
-				<FinalDate><![CDATA[1776758400000]]></FinalDate>	
+				<FinalDate><![CDATA[1776730080000]]></FinalDate>	
 				<FinalTime><![CDATA[480.0]]></FinalTime>	
 			</ModelTimeProperties>
 			<PresentationProperties>
