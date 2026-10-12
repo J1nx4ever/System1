@@ -15,6 +15,9 @@
 AnyLogic 端请按 [`ANYLOGIC_TERMINAL_MQTT_MANUAL.md`](ANYLOGIC_TERMINAL_MQTT_MANUAL.md)
 在当前工程中手工修改；`fusion_openpit_mine.original.alp` 仅作只读参考。
 
+AnyLogic MQTT 的连接配置、主题方向、线程处理约束和启动验收集中见
+[`ANYLOGIC_MQTT_GUIDE.md`](ANYLOGIC_MQTT_GUIDE.md)；按功能接入时再进入对应的详细指南。
+
 ## 已核对的真实发布契约
 
 来源为工作区 `fusion_openpit_mine.original.alp` 和
@@ -65,7 +68,33 @@ cd /home/jinx/桌面/System1/dispatch-center
 测试覆盖真实消息类的序列化/解码、字段校验、非连续全局序号、SQLite、REST、
 WebSocket 首帧/增量以及失联判断。
 
-## 启动
+## 一键现场演示
+
+在已按 AnyLogic 手工接入指南配置模型后，从工作区根目录运行一次：
+
+```bash
+cd /home/jinx/System1
+./demo.sh
+```
+
+脚本复用或启动本地 TLS Broker、Java 17 进程内 ONNX 后台，检查 MQTT/数据库，
+按需打开 AnyLogic GUI 和浏览器；不需要启动 50051/50060 的 Python 服务。
+如果没有活动 Run，调度页右上角点击「开始演示 Run」，然后在 AnyLogic 中
+打开已配置的模型并点击 Run。脚本不会自动运行、修改或关闭 `.alp`。
+若 8080 被缺少 Run 接口的旧版 systemd 后台占用，`./demo.sh` 会先构建工作区新版，
+随后提示确认并通过 sudo 临时停止旧服务；新后台使用工作区数据库，原系统数据库
+不修改。若新后台启动失败，脚本会尝试恢复旧服务。
+已有 AnyLogic GUI 无法补设新的环境变量；若现场 MQTT 认证失败，请关闭 GUI 后
+重跑脚本。`./demo.sh status` 查看状态。演示完成后从工作区根目录运行
+`./stop-demo.sh`（等价于 `./demo.sh stop`），停止脚本启动的后台/Broker，
+并恢复本次临时停止的 systemd 服务；不结束 Run，也不关闭 AnyLogic GUI
+或浏览器。支持 `--no-browser` 和
+`--no-anylogic`。启动日志位于 `dispatch-center/data/demo-launcher/`。
+
+若 `dispatch-center.env` 保存 MQTT 密码，建议先执行
+`chmod 600 dispatch-center/dispatch-center.env`。
+
+## 手动启动（可选）
 
 先启动 TLS Broker：
 
@@ -133,6 +162,12 @@ conda run -n anylogic-env python export_onnx.py --checkpoint checkpoint_000016/p
 - `POST /api/v1/simulations/{id}/terminal-messages/{messageId}/reply`
 - `GET /api/v1/simulations/{id}/alerts` and `POST .../alerts/{alertId}/{acknowledge|process|close}`
 - `GET /api/v1/simulations/{id}/audit`
+
+以上 `terminal-actions`、`terminal-messages`、`alerts` 的 GET 接口可传
+`runId={run_id}`；服务端先按 Run 的 `[started_at_ms, ended_at_ms)` 时间范围筛选，
+再执行 `limit`。终端页面传 `runId=active`，只看当前活动 Run；调度页面传当前所选
+Run ID。省略 `runId` 保留按 Simulation 查询的兼容行为，因此自定义客户端展示
+Run 级异常或对话时也应显式传参。旧记录不删除，切换历史 Run 仍可查看。
 
 WebSocket 建连后服务端立即发送 `snapshot`，之后发送 `map`、`vehicle`、
 `shovel`、`status`、`decisionTrace` 增量。客户端断线重连前重新调用 REST 快照，重连成功后

@@ -2,11 +2,18 @@
 
 目标链路：**卸载 → 自动派单 → 车端收到 → 行驶控制 → 人工改派**。
 
+演示结束后在工作区根目录运行 `./stop-demo.sh`。它只停止 `demo.sh` 启动的
+后台和 MQTT Broker；如果启动时临时停止了旧版 systemd 后台，还会将其恢复。
+它保留 Run 数据、AnyLogic GUI 与浏览器。启动时需要在交互终端确认临时切换，
+并输入 sudo 密码；旧版服务缺少 Run 接口，恢复后仍不能展示 Run 页面。
+
 ## 演示前准备
 
-1. 按 `ANYLOGIC_INFERENCE_GATEWAY.md` 修改并 Build AnyLogic 模型副本；原 `.alp` 不改。
-2. 启动派单推理服务 `127.0.0.1:50051`、速度推理服务 `127.0.0.1:50060`。
-3. 启动 TLS Mosquitto 与后台，打开：
+1. 按 `ANYLOGIC_INFERENCE_GATEWAY.md` 和 `ANYLOGIC_TERMINAL_MQTT_MANUAL.md`
+   在 AnyLogic 工程中手工配置并 Build；`fusion_openpit_mine.original.alp` 只读。
+2. 从工作区根目录执行 `./demo.sh`。脚本启动/复用 TLS Broker 与 Java 17
+   ONNX 后台，不需要 50051/50060 Python gRPC 服务。
+3. 如无活动 Run，在调度页点击「开始演示 Run」，再在 AnyLogic 模型中点击 Run。打开：
    - 调度中心：`http://localhost:8080/`
    - 车端：`http://localhost:8080/vehicle.html?vehicleId=0`
    - 铲端：`http://localhost:8080/shovel.html?shovelId=0`
@@ -42,9 +49,9 @@
 
 ## 4. 行驶控制
 
-保持仿真运行至少 5 秒，在调度中心筛看 `SPEED / SPEED_INFERENCE`，在车端看控制参考。
+保持仿真运行至少 12 秒，在调度中心切换「速度控制」查看采样证据，在车端看控制参考。
 
-**通过标准：**约每 500 ms 产生一批真实速度观测；每车输出只有一个有限加速度且在配置边界
+**通过标准：**约每 500 ms 产生一批真实速度观测并下发指令；证据每车首条、至少每 10 秒一条，状态/动作变化和异常回执另行保留。每车输出只有一个有限加速度且在配置边界
 `[-5.0, 3.0] m/s²` 内；指令含源状态序号、1 秒有效期；AnyLogic 应用后回执 `EXECUTED`，
 过期指令回执 `EXPIRED`，不得应用。
 
@@ -59,6 +66,6 @@
 
 ## 失败注入（建议现场演示一次）
 
-停止速度推理服务或 MQTT：调度中心不应显示伪造控制值；已有状态按失联阈值变灰，失败指令
+在可控时段断开 MQTT：调度中心不应显示伪造控制值；已有状态按失联阈值变灰，失败指令
 显示 `PUBLISH_FAILED`/无下发时间。恢复服务后使用新 UUID 继续，不复用旧指令。
 

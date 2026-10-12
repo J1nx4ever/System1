@@ -11,7 +11,8 @@ import java.util.List;
 public class AlertService {
     private final AccessRepository repo;private final AuditService audit;private final RealtimeHub realtime;
     public AlertService(AccessRepository r,AuditService a,RealtimeHub h){repo=r;audit=a;realtime=h;}
-    public List<OperationalAlert> list(String sim,AuthPrincipal p,int limit){try{return repo.alerts(sim,p.dispatcher()?null:p.role(),p.dispatcher()?null:p.subjectId(),Math.max(1,Math.min(500,limit)));}catch(SQLException e){throw new IllegalStateException(e);}}
+    public List<OperationalAlert> list(String sim,AuthPrincipal p,int limit){return list(sim,p,limit,null);}
+    public List<OperationalAlert> list(String sim,AuthPrincipal p,int limit,String runId){try{return repo.alerts(sim,p.dispatcher()?null:p.role(),p.dispatcher()?null:p.subjectId(),Math.max(1,Math.min(500,limit)),runId);}catch(SQLException e){throw new IllegalStateException(e);}}
     public OperationalAlert transition(String sim,String id,String action,String detail,AuthPrincipal p,String requestId){
         if(!p.dispatcher()){audit.record(p,requestId,"ALERT_"+action,"ALERT",id,"DENIED","dispatcher role required");throw new AccessDeniedException(HttpStatus.FORBIDDEN,"access_denied","只有调度员可处理告警");}
         String expected,next;switch(action){case "acknowledge"->{expected="OPEN";next="ACKNOWLEDGED";}case "process"->{expected="ACKNOWLEDGED";next="PROCESSING";}case "close"->{expected="PROCESSING";next="CLOSED";}default->throw new AccessDeniedException(HttpStatus.BAD_REQUEST,"invalid_transition","未知告警操作");}

@@ -18,6 +18,9 @@ public class TerminalConversationService {
     public TerminalConversationService(TerminalMessageRepository r,TerminalConversationMqttClient m,RealtimeHub h){repository=r;mqtt=m;realtime=h;}
 
     public List<TerminalMessage> list(String sim,AuthPrincipal p,String type,Integer id,int limit){
+        return list(sim,p,type,id,limit,null);
+    }
+    public List<TerminalMessage> list(String sim,AuthPrincipal p,String type,Integer id,int limit,String runId){
         if(p.dispatcher()){
             if((type==null)!=(id==null))bad(HttpStatus.BAD_REQUEST,"target type and id must be supplied together");
         } else {
@@ -25,7 +28,7 @@ public class TerminalConversationService {
             if(type!=null&&(!type.equals(p.role())||!Objects.equals(id,p.subjectId())))bad(HttpStatus.FORBIDDEN,"cross-terminal message access denied");
             type=p.role();id=p.subjectId();
         }
-        try{return repository.list(sim,type,id,limit);}catch(SQLException e){throw new IllegalStateException(e);}
+        try{return repository.list(sim,type,id,limit,runId);}catch(SQLException e){throw new IllegalStateException(e);}
     }
 
     public TerminalMessage send(String sim,AuthPrincipal p,TerminalMessageRequest request){

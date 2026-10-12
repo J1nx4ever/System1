@@ -48,17 +48,30 @@ public class AccessRepository {
         try(Connection c=open();PreparedStatement s=c.prepareStatement("INSERT INTO terminal_action VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")){int i=1;s.setString(i++,a.actionId());s.setString(i++,a.simulationId());s.setString(i++,a.actorUserId());s.setString(i++,a.actorUsername());s.setString(i++,a.actorRole());s.setString(i++,a.objectType());s.setInt(i++,a.objectId());s.setString(i++,a.actionType());nullableString(s,i++,a.commandId());s.setString(i++,a.detail());s.setLong(i++,a.createdAtMs());s.setString(i++,a.result());s.setString(i,a.resultDetail());s.executeUpdate();}
     }
     public List<TerminalAction> actions(String sim,String type,Integer id,int limit) throws SQLException {
-        String sql="SELECT * FROM terminal_action WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+" ORDER BY created_at_ms DESC LIMIT ?";
-        try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)){int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}s.setInt(i,limit);List<TerminalAction> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(action(r));}return out;}
+        return actions(sim,type,id,limit,null);
+    }
+    public List<TerminalAction> actions(String sim,String type,Integer id,int limit,String runId) throws SQLException {
+        String sql="SELECT * FROM terminal_action WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+runFilter("terminal_action",runId)+" ORDER BY created_at_ms DESC LIMIT ?";
+        try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)){int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}if(runId!=null&&!"active".equals(runId))s.setString(i++,runId);s.setInt(i,limit);List<TerminalAction> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(action(r));}return out;}
     }
     public void insertAlert(OperationalAlert a) throws SQLException {
         try(Connection c=open();PreparedStatement s=c.prepareStatement("INSERT INTO operational_alert VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")){bindAlert(s,a);s.executeUpdate();}
     }
     public Optional<OperationalAlert> alert(String id) throws SQLException {try(Connection c=open();PreparedStatement s=c.prepareStatement("SELECT * FROM operational_alert WHERE alert_id=?")){s.setString(1,id);try(ResultSet r=s.executeQuery()){return r.next()?Optional.of(alert(r)):Optional.empty();}}}
     public List<OperationalAlert> alerts(String sim,String type,Integer id,int limit) throws SQLException {
-        String sql="SELECT * FROM operational_alert WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+" ORDER BY created_at_ms DESC LIMIT ?";
-        try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)){int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}s.setInt(i,limit);List<OperationalAlert> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(alert(r));}return out;}
+        return alerts(sim,type,id,limit,null);
     }
+    public List<OperationalAlert> alerts(String sim,String type,Integer id,int limit,String runId) throws SQLException {
+        String sql="SELECT * FROM operational_alert WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+runFilter("operational_alert",runId)+" ORDER BY created_at_ms DESC LIMIT ?";
+        try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)){int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}if(runId!=null&&!"active".equals(runId))s.setString(i++,runId);s.setInt(i,limit);List<OperationalAlert> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(alert(r));}return out;}
+    }
+    private static String runFilter(String table,String runId){
+        if(runId==null)return "";
+        return " AND EXISTS (SELECT 1 FROM run_context r WHERE r.simulation_id="+table+".simulation_id AND "
+                +("active".equals(runId)?"r.ended_at_ms IS NULL":"r.run_id=?")
+                +" AND "+table+".created_at_ms>=r.started_at_ms AND (r.ended_at_ms IS NULL OR "+table+".created_at_ms<r.ended_at_ms))";
+    }
+
     public OperationalAlert transition(String id,String expected,String next,String username,String detail,long now) throws SQLException {
         String assignments=switch(next){case "ACKNOWLEDGED"->"status=?,acknowledged_by=?,acknowledged_at_ms=?,version=version+1";case "PROCESSING"->"status=?,processing_by=?,processing_at_ms=?,version=version+1";default->"status=?,closed_by=?,closed_at_ms=?,resolution=?,version=version+1";};
         try(Connection c=open();PreparedStatement s=c.prepareStatement("UPDATE operational_alert SET "+assignments+" WHERE alert_id=? AND status=?")){int i=1;s.setString(i++,next);s.setString(i++,username);s.setLong(i++,now);if("CLOSED".equals(next))s.setString(i++,detail);s.setString(i++,id);s.setString(i,expected);if(s.executeUpdate()!=1)throw new SQLException("alert transition conflict");}

@@ -58,9 +58,13 @@ public class TerminalMessageRepository {
         }
     }
     public List<TerminalMessage> list(String sim,String type,Integer id,int limit) throws SQLException {
-        String sql="SELECT * FROM terminal_message WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+" ORDER BY created_at_ms DESC LIMIT ?";
+        return list(sim,type,id,limit,null);
+    }
+    public List<TerminalMessage> list(String sim,String type,Integer id,int limit,String runId) throws SQLException {
+        String runFilter=runId==null?"":" AND EXISTS (SELECT 1 FROM run_context r WHERE r.simulation_id=terminal_message.simulation_id AND "+("active".equals(runId)?"r.ended_at_ms IS NULL":"r.run_id=?")+" AND terminal_message.created_at_ms>=r.started_at_ms AND (r.ended_at_ms IS NULL OR terminal_message.created_at_ms<r.ended_at_ms))";
+        String sql="SELECT * FROM terminal_message WHERE simulation_id=?"+(type==null?"":" AND object_type=? AND object_id=?")+runFilter+" ORDER BY created_at_ms DESC LIMIT ?";
         try(Connection c=open();PreparedStatement s=c.prepareStatement(sql)) {
-            int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}s.setInt(i,Math.max(1,Math.min(limit,500)));
+            int i=1;s.setString(i++,sim);if(type!=null){s.setString(i++,type);s.setInt(i++,id);}if(runId!=null&&!"active".equals(runId))s.setString(i++,runId);s.setInt(i,Math.max(1,Math.min(limit,500)));
             List<TerminalMessage> out=new ArrayList<>();try(ResultSet r=s.executeQuery()){while(r.next())out.add(row(r));}
             Collections.reverse(out);return out;
         }

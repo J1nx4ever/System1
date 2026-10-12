@@ -17,10 +17,10 @@ public class TerminalConversationController {
     public TerminalConversationController(TerminalConversationService m,AuthorizationService a){messages=m;authorization=a;}
     @GetMapping public List<TerminalMessage> list(@PathVariable String simulationId,
             @RequestParam(required=false) String objectType,@RequestParam(required=false) Integer objectId,
-            @RequestParam(defaultValue="100") int limit,HttpServletRequest request){
+            @RequestParam(defaultValue="100") int limit,@RequestParam(required=false) String runId,HttpServletRequest request){
         AuthPrincipal p=AuthenticationFilter.principal(request);
         authorization.simulation(p,simulationId,AuthenticationFilter.requestId(request),"TERMINAL_MESSAGES_READ");
-        return messages.list(simulationId,p,objectType,objectId,limit);
+        return messages.list(simulationId,p,objectType,objectId,limit,runId);
     }
     @PostMapping public TerminalMessage send(@PathVariable String simulationId,@Valid @RequestBody TerminalMessageRequest body,HttpServletRequest request){
         AuthPrincipal p=AuthenticationFilter.principal(request);

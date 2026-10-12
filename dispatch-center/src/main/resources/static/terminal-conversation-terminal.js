@@ -41,7 +41,7 @@ window.dispatchIdentity.then(identity => {
   };
   async function refresh() {
     try {
-      const response = await fetch(`/api/v1/simulations/${encodeURIComponent(sim)}/terminal-messages?limit=100`, {cache:'no-store'});
+      const response = await fetch(`/api/v1/simulations/${encodeURIComponent(sim)}/terminal-messages?limit=100&runId=active`, {cache:'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const messages = await response.json();
       if (!messages.length) { thread.textContent = '暂无调度消息'; return; }

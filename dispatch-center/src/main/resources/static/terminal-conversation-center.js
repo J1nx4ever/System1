@@ -74,12 +74,12 @@ window.dispatchIdentity.then(identity => {
     try {
       const [runs,response] = await Promise.all([
         getRuns(sim),
-        fetch(`/api/v1/simulations/${encodeURIComponent(sim)}/terminal-messages?limit=500`, {cache:'no-store'})
+        fetch(`/api/v1/simulations/${encodeURIComponent(sim)}/terminal-messages?limit=500&runId=${encodeURIComponent(runId)}`, {cache:'no-store'})
       ]);
       if (!response.ok) throw new Error(`消息 HTTP ${response.status}`);
       const run = runs.find(x => x.run_id === runId);
       if (!run) { thread.textContent = '运行记录不存在'; return; }
-      const messages = (await response.json()).filter(m => m.createdAtMs >= Number(run.started_at_ms) && (run.ended_at_ms == null || m.createdAtMs <= Number(run.ended_at_ms)));
+      const messages = await response.json();
       if (!messages.length) { thread.textContent = '当前 Run 尚无终端消息'; return; }
       thread.innerHTML = messages.map(m => `<article class="conversation-item ${m.direction === 'INBOUND' ? 'inbound' : 'outbound'} ${m.status === 'FAILED' ? 'failed' : ''}"><div class="meta"><b>${esc(label(m))}</b><span>${m.direction === 'INBOUND' ? '现场回复' : '调度下发'}</span><span>${esc(m.senderName)}</span><time>${new Date(m.createdAtMs).toLocaleString()}</time><span>${esc(status(m))}</span></div><p>${esc(m.body)}</p>${m.statusDetail ? `<small>${esc(m.statusDetail)}</small>` : ''}${m.direction === 'INBOUND' ? `<button type="button" data-reply="${esc(m.objectType)}|${m.objectId}|${esc(m.messageId)}">回复该终端</button>` : ''}</article>`).join('');
     } catch (error) { thread.textContent = `消息加载失败：${error.message}`; }

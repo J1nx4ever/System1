@@ -31,7 +31,8 @@ class TerminalConversationIntegrationTest {
         registry.add("dispatch.storage.jdbc-url", () -> "jdbc:sqlite:" + DATABASE);
         registry.add("dispatch.security.bootstrap-users", () ->
                 "dispatcher|dispatch-pass|DISPATCHER||;truck0|truck-pass|VEHICLE|SIM_CHAT|0;" +
-                "truck1|truck-pass|VEHICLE|SIM_CHAT|1;shovel0|shovel-pass|SHOVEL|SIM_CHAT|0");
+                "truck1|truck-pass|VEHICLE|SIM_CHAT|1;shovel0|shovel-pass|SHOVEL|SIM_CHAT|0;" +
+                "truckRun|truck-pass|VEHICLE|SIM_RUN|0");
     }
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
@@ -75,6 +76,38 @@ class TerminalConversationIntegrationTest {
         assertThat(all.get(1).path("body").asText()).isEqualTo("已检查");
         assertThat(body(get(path, truck0))).hasSize(2);
         assertThat(body(get(path, truck1))).isEmpty();
+    }
+
+    @Test void reportsAndMessagesStayInsideTheirRunBeforeLimit() throws Exception {
+        String dispatcher = login("dispatcher", "dispatch-pass");
+        String truck = login("truckRun", "truck-pass");
+        String sim = "/api/v1/simulations/SIM_RUN";
+        String first = body(post("/api/v1/runs", dispatcher,
+                "{\"simulationId\":\"SIM_RUN\",\"scenarioId\":\"first\"}")).path("run_id").asText();
+        body(post(sim + "/terminal-actions", truck,
+                "{\"actionType\":\"EXCEPTION\",\"detail\":\"first-run-fault\",\"severity\":\"WARNING\"}"));
+        body(post(sim + "/terminal-messages", dispatcher,
+                "{\"objectType\":\"VEHICLE\",\"objectId\":0,\"body\":\"first-run-message\"}"));
+        Thread.sleep(10);
+        body(post("/api/v1/runs/" + first + "/finish", dispatcher, "{}"));
+        Thread.sleep(10);
+        String second = body(post("/api/v1/runs", dispatcher,
+                "{\"simulationId\":\"SIM_RUN\",\"scenarioId\":\"second\"}")).path("run_id").asText();
+        body(post(sim + "/terminal-actions", truck,
+                "{\"actionType\":\"EXCEPTION\",\"detail\":\"second-run-fault\",\"severity\":\"CRITICAL\"}"));
+        body(post(sim + "/terminal-messages", dispatcher,
+                "{\"objectType\":\"VEHICLE\",\"objectId\":0,\"body\":\"second-run-message\"}"));
+
+        for (String endpoint : new String[]{"/terminal-actions", "/alerts", "/terminal-messages"}) {
+            JsonNode older = body(get(sim + endpoint + "?limit=1&runId=" + first, dispatcher));
+            JsonNode newer = body(get(sim + endpoint + "?limit=1&runId=" + second, dispatcher));
+            assertThat(older).hasSize(1);
+            assertThat(newer).hasSize(1);
+            assertThat(older.get(0).toString()).contains("first-run-");
+            assertThat(newer.get(0).toString()).contains("second-run-");
+            assertThat(body(get(sim + endpoint + "?limit=1&runId=active", truck))).hasSize(1);
+            assertThat(body(get(sim + endpoint + "?limit=1&runId=missing", dispatcher))).isEmpty();
+        }
     }
 
     private String login(String username, String password) throws Exception {
